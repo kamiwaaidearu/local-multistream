@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:developers.facebook.com)",
+      "WebFetch(domain:developers.twitch.tv)",
+      "WebFetch(domain:developers.google.com)",
+      "WebFetch(domain:dev.twitch.tv)",
+      "Bash(npm install:*)",
+      "Bash(node -e \"const sqlite = require\\('node:sqlite'\\); console.log\\('Built-in SQLite available'\\)\")",
+      "Bash(node -e ':*)",
+      "Bash(timeout 10 npx tsx server/index.ts)",
+      "Bash(timeout 8 npx tsx server/index.ts)",
+      "Bash(npx tsx:*)",
+      "Bash(curl -s http://localhost:3000/api/auth/status)",
+      "Bash(curl -s http://localhost:3000/api/streams)",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "Bash(node --experimental-strip-types -e ':*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx vite:*)",
+      "Bash(grep -n \"facebook.*auto\\\\|facebookAutoSetup\\\\|startup\\\\|missing component\\\\|useSSE\\\\|useStreams\\\\|useAuth\" /z/Projects/local-multistream/server/*.ts /z/Projects/local-multistream/client/src/*.tsx)",
+      "Bash(grep:*)",
+      "Bash(npm run:*)",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://localhost:5173/api/auth/status)",
+      "Bash(gh auth:*)"
+    ]
+  }
+}

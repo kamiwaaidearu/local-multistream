@@ -1,0 +1,25 @@
+node_modules/
+dist/
+client/node_modules/
+client/dist/
+
+# Environment
+.env
+
+# Database
+data/*.db
+data/*.db-journal
+data/*.db-shm
+data/*.db-wal
+
+# Uploads (keep directory, ignore files)
+uploads/*
+!uploads/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
