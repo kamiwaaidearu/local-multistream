@@ -62,7 +62,7 @@ export function getYouTubeAuth(): ReturnType<typeof createOAuth2Client> | null {
   // Persist refreshed tokens
   oauth2Client.on('tokens', (tokens) => {
     const updates: string[] = [];
-    const values: unknown[] = [];
+    const values: (string | number | null)[] = [];
 
     if (tokens.access_token) {
       updates.push('access_token = ?');

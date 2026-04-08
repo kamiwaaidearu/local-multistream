@@ -62,7 +62,14 @@ function buildFfmpegArgs(platformStream: PlatformStream): string[] {
     output = `${platformStream.rtmp_url}/${platformStream.stream_key}`;
   }
 
-  return ['-i', input, '-c', 'copy', '-f', 'flv', output];
+  return [
+    '-rw_timeout', '10000000',   // 10s I/O timeout (microseconds) — prevents instant crash on brief RTMP hiccups
+    '-i', input,
+    '-c', 'copy',
+    '-flvflags', 'no_duration_filesize',
+    '-f', 'flv',
+    output,
+  ];
 }
 
 function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): void {

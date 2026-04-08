@@ -157,7 +157,7 @@ export async function goLive(streamId: string): Promise<void> {
   const liveStream = db.prepare("SELECT id FROM streams WHERE status = 'live'").get() as { id: string } | undefined;
   if (liveStream) throw new Error('Another stream is already live. End it first.');
 
-  const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(streamId) as PlatformStream[];
+  const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(streamId) as unknown as PlatformStream[];
   if (platformStreams.length === 0) throw new Error('No platforms are set up');
 
   // Update Twitch title at go-live time
@@ -217,7 +217,7 @@ export async function endStream(streamId: string): Promise<void> {
   const { stopFanOut } = await import('../fanout/ffmpeg.js');
   await stopFanOut(streamId);
 
-  const platformStreams = db.prepare('SELECT * FROM platform_streams WHERE stream_id = ?').all(streamId) as PlatformStream[];
+  const platformStreams = db.prepare('SELECT * FROM platform_streams WHERE stream_id = ?').all(streamId) as unknown as PlatformStream[];
 
   // End YouTube broadcast
   const ytPs = platformStreams.find((ps) => ps.platform === 'youtube');

@@ -1,10 +1,14 @@
 import express from 'express';
+import https from 'https';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { config, validateConfig } from './config.js';
 import { getDb, closeDb } from './db/index.js';
 import { apiRouter } from './routes/api.js';
 import { authRouter } from './routes/auth.js';
+import { studioRouter } from './routes/studio.js';
+import { authMiddleware, handleLogin, handleAuthCheck } from './studio/auth.js';
+import { getOrCreateCert } from './cert.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,9 +18,17 @@ const app = express();
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
+// Auth endpoints (before auth middleware so they're accessible)
+app.post('/api/auth/login', handleLogin);
+app.get('/api/auth/check', handleAuthCheck);
+
+// Auth middleware for all API routes (skipped if APP_SECRET is empty)
+app.use('/api', authMiddleware);
+
 // API routes
 app.use('/api', apiRouter);
 app.use('/auth', authRouter);
+app.use('/api/studio', studioRouter);
 
 // Serve React app in production
 const clientDist = path.join(__dirname, '..', 'client', 'dist');
@@ -47,9 +59,19 @@ async function start(): Promise<void> {
     console.warn('[server] Facebook auto-setup check failed:', err),
   );
 
-  app.listen(config.port, () => {
+  const httpServer = app.listen(config.port, () => {
     console.log(`[server] Local Multistream running at http://localhost:${config.port}`);
   });
+
+  // Start HTTPS server for platforms that require SSL redirect URIs (e.g. Facebook)
+  const cert = await getOrCreateCert();
+  const httpsServer = https.createServer({ key: cert.private, cert: cert.cert }, app).listen(config.httpsPort, () => {
+    console.log(`[server] HTTPS server running at https://localhost:${config.httpsPort}`);
+  });
+
+  // Initialize studio WebSocket on both servers
+  const { initStudioWebSocket } = await import('./studio/ingest.js');
+  initStudioWebSocket(httpServer, httpsServer);
 }
 
 /**
@@ -100,6 +122,10 @@ async function shutdown(): Promise<void> {
   try {
     const { killAll } = await import('./fanout/ffmpeg.js');
     killAll();
+  } catch { /* not initialized */ }
+  try {
+    const { shutdownStudio } = await import('./studio/ingest.js');
+    shutdownStudio();
   } catch { /* not initialized */ }
   closeDb();
   process.exit(0);

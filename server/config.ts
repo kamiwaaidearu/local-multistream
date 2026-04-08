@@ -18,9 +18,11 @@ function envInt(key: string, fallback: number): number {
 
 export const config = Object.freeze({
   port: envInt('PORT', 3000),
+  httpsPort: envInt('HTTPS_PORT', 3443),
   rtmpPort: envInt('RTMP_PORT', 1935),
   localStreamKey: env('LOCAL_STREAM_KEY', 'multistream-live'),
   fbApiVersion: env('FB_API_VERSION', 'v25.0'),
+  appSecret: process.env.APP_SECRET ?? '',
 
   youtube: {
     clientId: process.env.YT_CLIENT_ID ?? '',
@@ -31,7 +33,7 @@ export const config = Object.freeze({
   facebook: {
     appId: process.env.FB_APP_ID ?? '',
     appSecret: process.env.FB_APP_SECRET ?? '',
-    redirectUri: env('FB_REDIRECT_URI', 'http://localhost:3000/auth/facebook/callback'),
+    redirectUri: env('FB_REDIRECT_URI', 'https://localhost:3443/auth/facebook/callback'),
   },
 
   twitch: {

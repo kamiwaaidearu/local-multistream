@@ -90,7 +90,7 @@ export async function createYouTubeBroadcast(
         scheduledStartTime: startTime,
       },
       contentDetails: {
-        enableAutoStart: false,
+        enableAutoStart: true,
         enableAutoStop: false,
         latencyPreference: 'normal',
         monitorStream: { enableMonitorStream: false },
@@ -129,6 +129,25 @@ export async function createYouTubeBroadcast(
  */
 export async function transitionToLive(broadcastId: string, streamId: string): Promise<void> {
   const yt = getYouTube();
+
+  // If broadcast is scheduled in the future, move start time to now so YouTube allows the transition
+  try {
+    const bcRes = await yt.liveBroadcasts.list({ id: [broadcastId], part: ['snippet', 'status'] });
+    const bc = bcRes.data.items?.[0];
+    if (bc?.snippet?.scheduledStartTime) {
+      const scheduled = new Date(bc.snippet.scheduledStartTime).getTime();
+      if (scheduled > Date.now() + 60_000) {
+        console.log('[youtube] Broadcast scheduled in the future — moving start time to now');
+        bc.snippet.scheduledStartTime = new Date().toISOString();
+        await yt.liveBroadcasts.update({
+          part: ['snippet'],
+          requestBody: { id: broadcastId, snippet: bc.snippet },
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('[youtube] Could not update scheduled start time:', err);
+  }
 
   // Poll for stream active status (max 2 min, every 5s)
   for (let i = 0; i < 24; i++) {

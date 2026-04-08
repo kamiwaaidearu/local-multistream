@@ -39,3 +39,11 @@ CREATE TABLE IF NOT EXISTS event_log (
   detail    TEXT,
   ts        INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS studio_templates (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  is_default  INTEGER DEFAULT 0,
+  created_at  TEXT DEFAULT (datetime('now'))
+);

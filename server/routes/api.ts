@@ -8,6 +8,12 @@ import type { Stream, PlatformStream } from '../types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Helper to safely extract a string param from Express route params
+function param(req: Request, key: string): string {
+  const val = req.params[key];
+  return Array.isArray(val) ? val[0] : val;
+}
+
 const upload = multer({
   dest: path.join(__dirname, '..', '..', 'uploads'),
   limits: { fileSize: 2 * 1024 * 1024 }, // 2MB
@@ -26,7 +32,7 @@ export const apiRouter = Router();
 
 apiRouter.get('/streams', (_req: Request, res: Response) => {
   const db = getDb();
-  const streams = db.prepare('SELECT * FROM streams ORDER BY created_at DESC').all() as Stream[];
+  const streams = db.prepare('SELECT * FROM streams ORDER BY created_at DESC').all() as unknown as Stream[];
   res.json(streams);
 });
 
@@ -41,27 +47,29 @@ apiRouter.post('/streams', upload.single('thumbnail'), (req: Request, res: Respo
     VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)
   `).run(id, series_id ?? null, name, description ?? null, thumbnail_path, scheduled_start ? parseInt(scheduled_start) : null, Date.now());
 
-  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as Stream;
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream;
   res.status(201).json(stream);
 });
 
 apiRouter.get('/streams/:id', (req: Request, res: Response) => {
   const db = getDb();
-  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as Stream | undefined;
+  const id = param(req, 'id');
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream | undefined;
   if (!stream) {
     res.status(404).json({ error: 'Stream not found' });
     return;
   }
 
-  const platformStreams = db.prepare('SELECT * FROM platform_streams WHERE stream_id = ?').all(req.params.id) as PlatformStream[];
-  const events = db.prepare('SELECT * FROM event_log WHERE stream_id = ? ORDER BY ts DESC LIMIT 50').all(req.params.id);
+  const platformStreams = db.prepare('SELECT * FROM platform_streams WHERE stream_id = ?').all(id) as unknown as PlatformStream[];
+  const events = db.prepare('SELECT * FROM event_log WHERE stream_id = ? ORDER BY ts DESC LIMIT 50').all(id);
 
   res.json({ ...stream, platforms: platformStreams, events });
 });
 
 apiRouter.patch('/streams/:id', upload.single('thumbnail'), async (req: Request, res: Response) => {
   const db = getDb();
-  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as Stream | undefined;
+  const id = param(req, 'id');
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream | undefined;
   if (!stream) {
     res.status(404).json({ error: 'Stream not found' });
     return;
@@ -75,21 +83,21 @@ apiRouter.patch('/streams/:id', upload.single('thumbnail'), async (req: Request,
   const thumbnail_path = req.file ? `/uploads/${req.file.filename}` : undefined;
 
   const updates: string[] = [];
-  const values: unknown[] = [];
+  const values: (string | number | null)[] = [];
 
-  if (name !== undefined) { updates.push('name = ?'); values.push(name); }
-  if (description !== undefined) { updates.push('description = ?'); values.push(description); }
+  if (name !== undefined) { updates.push('name = ?'); values.push(name as string); }
+  if (description !== undefined) { updates.push('description = ?'); values.push(description as string); }
   if (scheduled_start !== undefined) { updates.push('scheduled_start = ?'); values.push(scheduled_start ? parseInt(scheduled_start as string) : null); }
   if (thumbnail_path !== undefined) { updates.push('thumbnail_path = ?'); values.push(thumbnail_path); }
 
   if (updates.length > 0) {
-    values.push(req.params.id);
+    values.push(id);
     db.prepare(`UPDATE streams SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   }
 
   // Sync changes to YouTube/Facebook if platform_streams exist with 'created' status
-  const updated = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as Stream;
-  const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(req.params.id) as PlatformStream[];
+  const updated = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream;
+  const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(id) as unknown as PlatformStream[];
 
   const syncWarnings: string[] = [];
 
@@ -139,7 +147,8 @@ apiRouter.patch('/streams/:id', upload.single('thumbnail'), async (req: Request,
 
 apiRouter.delete('/streams/:id', async (req: Request, res: Response) => {
   const db = getDb();
-  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as Stream | undefined;
+  const id = param(req, 'id');
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream | undefined;
   if (!stream) {
     res.status(404).json({ error: 'Stream not found' });
     return;
@@ -150,7 +159,7 @@ apiRouter.delete('/streams/:id', async (req: Request, res: Response) => {
   }
 
   // Cancel YouTube broadcast + delete Facebook live video if platform_streams exist
-  const platformStreams = db.prepare('SELECT * FROM platform_streams WHERE stream_id = ?').all(req.params.id) as PlatformStream[];
+  const platformStreams = db.prepare('SELECT * FROM platform_streams WHERE stream_id = ?').all(id) as unknown as PlatformStream[];
 
   for (const ps of platformStreams) {
     try {
@@ -166,7 +175,7 @@ apiRouter.delete('/streams/:id', async (req: Request, res: Response) => {
     }
   }
 
-  db.prepare('DELETE FROM streams WHERE id = ?').run(req.params.id);
+  db.prepare('DELETE FROM streams WHERE id = ?').run(id);
   res.status(204).end();
 });
 
@@ -194,12 +203,14 @@ apiRouter.post('/series', upload.array('thumbnails', 20), (req: Request, res: Re
   const created: Stream[] = [];
   const now = Date.now();
 
-  const insertAll = db.transaction(() => {
+  // DatabaseSync.transaction() exists at runtime but isn't in the type defs yet
+  const transaction = (db as unknown as { transaction: (fn: () => void) => () => void }).transaction;
+  const insertAll = transaction(() => {
     streamEntries.forEach((entry, i) => {
       const id = nanoid();
       const thumbnail = files[i] ? `/uploads/${files[i].filename}` : null;
       insertStmt.run(id, seriesId, entry.name, entry.description ?? null, thumbnail, entry.scheduled_start ?? null, now);
-      created.push(db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as Stream);
+      created.push(db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream);
     });
   });
 
@@ -209,12 +220,13 @@ apiRouter.post('/series', upload.array('thumbnails', 20), (req: Request, res: Re
 
 apiRouter.get('/series/:seriesId', (req: Request, res: Response) => {
   const db = getDb();
-  const streams = db.prepare('SELECT * FROM streams WHERE series_id = ? ORDER BY scheduled_start ASC').all(req.params.seriesId) as Stream[];
+  const seriesId = param(req, 'seriesId');
+  const streams = db.prepare('SELECT * FROM streams WHERE series_id = ? ORDER BY scheduled_start ASC').all(seriesId) as unknown as Stream[];
   if (streams.length === 0) {
     res.status(404).json({ error: 'Series not found' });
     return;
   }
-  res.json({ series_id: req.params.seriesId, streams });
+  res.json({ series_id: seriesId, streams });
 });
 
 // --- Setup & Go Live ---
@@ -222,7 +234,7 @@ apiRouter.get('/series/:seriesId', (req: Request, res: Response) => {
 apiRouter.post('/streams/:id/setup', async (req: Request, res: Response) => {
   try {
     const { setupStream } = await import('../stream/manager.js');
-    const result = await setupStream(req.params.id);
+    const result = await setupStream(param(req, 'id'));
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -232,7 +244,7 @@ apiRouter.post('/streams/:id/setup', async (req: Request, res: Response) => {
 apiRouter.post('/streams/:id/setup/:platform', async (req: Request, res: Response) => {
   try {
     const { setupSinglePlatform } = await import('../stream/manager.js');
-    await setupSinglePlatform(req.params.id, req.params.platform as 'youtube' | 'facebook' | 'twitch');
+    await setupSinglePlatform(param(req, 'id'), param(req, 'platform') as 'youtube' | 'facebook' | 'twitch');
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -243,7 +255,8 @@ apiRouter.post('/series/:seriesId/setup', async (req: Request, res: Response) =>
   try {
     const { setupStream } = await import('../stream/manager.js');
     const db = getDb();
-    const streams = db.prepare('SELECT id FROM streams WHERE series_id = ? ORDER BY scheduled_start ASC').all(req.params.seriesId) as Array<{ id: string }>;
+    const seriesId = param(req, 'seriesId');
+    const streams = db.prepare('SELECT id FROM streams WHERE series_id = ? ORDER BY scheduled_start ASC').all(seriesId) as unknown as Array<{ id: string }>;
     const results: Record<string, unknown> = {};
     for (const s of streams) {
       results[s.id] = await setupStream(s.id);
@@ -257,7 +270,7 @@ apiRouter.post('/series/:seriesId/setup', async (req: Request, res: Response) =>
 apiRouter.post('/streams/:id/go-live', async (req: Request, res: Response) => {
   try {
     const { goLive } = await import('../stream/manager.js');
-    await goLive(req.params.id);
+    await goLive(param(req, 'id'));
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -267,7 +280,7 @@ apiRouter.post('/streams/:id/go-live', async (req: Request, res: Response) => {
 apiRouter.post('/streams/:id/end', async (req: Request, res: Response) => {
   try {
     const { endStream } = await import('../stream/manager.js');
-    await endStream(req.params.id);
+    await endStream(param(req, 'id'));
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
@@ -278,7 +291,7 @@ apiRouter.post('/streams/:id/end', async (req: Request, res: Response) => {
 
 apiRouter.get('/auth/status', (_req: Request, res: Response) => {
   const db = getDb();
-  const creds = db.prepare('SELECT platform, access_token FROM credentials').all() as Array<{ platform: string; access_token: string | null }>;
+  const creds = db.prepare('SELECT platform, access_token FROM credentials').all() as unknown as Array<{ platform: string; access_token: string | null }>;
 
   const status = {
     youtube: creds.some((c) => c.platform === 'youtube' && c.access_token),
@@ -319,7 +332,7 @@ apiRouter.post('/auth/facebook/page', async (req: Request, res: Response) => {
 // --- Disconnect ---
 
 apiRouter.post('/auth/disconnect/:platform', async (req: Request, res: Response) => {
-  const platform = req.params.platform;
+  const platform = param(req, 'platform');
   try {
     if (platform === 'youtube') {
       const { disconnectYouTube } = await import('../auth/youtube.js');

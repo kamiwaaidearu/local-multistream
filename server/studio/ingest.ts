@@ -1,0 +1,175 @@
+import { Server as HttpServer, IncomingMessage } from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
+import { spawn, ChildProcess } from 'child_process';
+import { config } from '../config.js';
+import { validateToken } from './auth.js';
+
+let ffmpegPath: string;
+try {
+  ffmpegPath = (await import('ffmpeg-static')).default as unknown as string;
+} catch {
+  ffmpegPath = 'ffmpeg';
+}
+
+let studioConnected = false;
+let activeWs: WebSocket | null = null;
+let ingestFfmpeg: ChildProcess | null = null;
+
+export function isStudioConnected(): boolean {
+  return studioConnected;
+}
+
+function stopIngestFfmpeg(): void {
+  if (ingestFfmpeg) {
+    console.log('[studio] Stopping ingest FFmpeg');
+    try {
+      ingestFfmpeg.stdin?.end();
+    } catch { /* ignore */ }
+
+    const proc = ingestFfmpeg;
+    ingestFfmpeg = null;
+
+    // Give it 5s to exit gracefully, then force kill
+    const timeout = setTimeout(() => {
+      try { proc.kill(); } catch { /* ignore */ }
+    }, 5000);
+
+    proc.on('close', () => clearTimeout(timeout));
+  }
+  studioConnected = false;
+}
+
+function startIngestFfmpeg(): ChildProcess {
+  const rtmpUrl = `rtmp://127.0.0.1:${config.rtmpPort}/live/${config.localStreamKey}`;
+
+  const args = [
+    '-f', 'webm',
+    '-analyzeduration', '1000000',
+    '-probesize', '1000000',
+    '-i', 'pipe:0',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-tune', 'zerolatency',
+    '-b:v', '4500k',
+    '-maxrate', '4500k',
+    '-bufsize', '9000k',
+    '-pix_fmt', 'yuv420p',
+    '-g', '60',
+    '-c:a', 'aac',
+    '-b:a', '128k',
+    '-ar', '44100',
+    '-f', 'flv',
+    rtmpUrl,
+  ];
+
+  console.log(`[studio] Starting ingest FFmpeg → ${rtmpUrl}`);
+  const child = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+
+  child.stderr?.on('data', (data: Buffer) => {
+    const line = data.toString().trim();
+    if (line) {
+      // Log FFmpeg output for debugging (filter noise)
+      if (line.includes('frame=') || line.includes('Error') || line.includes('error')) {
+        console.log(`[studio:ffmpeg] ${line}`);
+      }
+    }
+  });
+
+  child.on('close', (code) => {
+    console.log(`[studio] Ingest FFmpeg exited with code ${code}`);
+    if (ingestFfmpeg === child) {
+      ingestFfmpeg = null;
+      studioConnected = false;
+    }
+  });
+
+  child.on('error', (err) => {
+    console.error('[studio] Ingest FFmpeg error:', err);
+  });
+
+  return child;
+}
+
+function handleConnection(ws: WebSocket): void {
+  // Only one studio connection at a time
+  if (activeWs) {
+    console.log('[studio] Rejecting connection — another studio is already connected');
+    ws.close(4000, 'Another studio session is already active');
+    return;
+  }
+
+  console.log('[studio] WebSocket connected');
+  activeWs = ws;
+  studioConnected = true;
+
+  // Start ingest FFmpeg
+  ingestFfmpeg = startIngestFfmpeg();
+
+  ws.on('message', (data: Buffer) => {
+    // Binary WebSocket messages are webm chunks — pipe directly to FFmpeg stdin
+    if (ingestFfmpeg?.stdin?.writable) {
+      try {
+        ingestFfmpeg.stdin.write(data);
+      } catch (err) {
+        console.error('[studio] Error writing to FFmpeg stdin:', err);
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('[studio] WebSocket disconnected');
+    if (activeWs === ws) {
+      activeWs = null;
+      stopIngestFfmpeg();
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error('[studio] WebSocket error:', err);
+    if (activeWs === ws) {
+      activeWs = null;
+      stopIngestFfmpeg();
+    }
+  });
+}
+
+/**
+ * Initialize the studio WebSocket server on existing HTTP/HTTPS servers.
+ */
+export function initStudioWebSocket(...servers: HttpServer[]): void {
+  for (const server of servers) {
+    const wss = new WebSocketServer({ noServer: true });
+
+    server.on('upgrade', (request: IncomingMessage, socket, head) => {
+      const url = new URL(request.url ?? '', `http://${request.headers.host}`);
+
+      if (url.pathname !== '/ws/studio') return;
+
+      // Authenticate via query param
+      const token = url.searchParams.get('token') ?? '';
+      if (config.appSecret && !validateToken(token)) {
+        console.log('[studio] WebSocket auth failed');
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        handleConnection(ws);
+      });
+    });
+  }
+
+  console.log('[studio] WebSocket server initialized on /ws/studio');
+}
+
+/**
+ * Clean up studio resources on shutdown.
+ */
+export function shutdownStudio(): void {
+  if (activeWs) {
+    activeWs.close(1001, 'Server shutting down');
+    activeWs = null;
+  }
+  stopIngestFfmpeg();
+}
