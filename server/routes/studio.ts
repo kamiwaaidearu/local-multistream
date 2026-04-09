@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { isStudioConnected } from '../studio/ingest.js';
 import { isObsConnected } from '../rtmp/server.js';
-import { getDb } from '../db/index.js';
+import { getDb, DEFAULT_GRID_TEMPLATE } from '../db/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -70,6 +70,16 @@ studioRouter.patch('/template/:id', (req: Request, res: Response) => {
   }
 
   const updated = db.prepare('SELECT * FROM studio_templates WHERE id = ?').get(id) as Record<string, unknown>;
+  res.json({ ...updated, config_json: JSON.parse(updated.config_json as string) });
+});
+
+// --- Reset template to default ---
+
+studioRouter.post('/template/reset', (_req: Request, res: Response) => {
+  const db = getDb();
+  db.prepare('UPDATE studio_templates SET config_json = ? WHERE id = ?')
+    .run(JSON.stringify(DEFAULT_GRID_TEMPLATE), 'default');
+  const updated = db.prepare('SELECT * FROM studio_templates WHERE id = ?').get('default') as Record<string, unknown>;
   res.json({ ...updated, config_json: JSON.parse(updated.config_json as string) });
 });
 

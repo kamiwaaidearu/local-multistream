@@ -12,9 +12,11 @@ import {
   Slider,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { useCanvasCompositor, type CanvasTemplate } from '../hooks/useCanvasCompositor';
+import { useCanvasCompositor, type GridTemplate } from '../hooks/useCanvasCompositor';
 import { useAudioMixer } from '../hooks/useAudioMixer';
 import { useStudioStream } from '../hooks/useStudioStream';
+import { DEFAULT_GRID_TEMPLATE } from '../lib/gridTemplate';
+import { TemplateEditor } from './TemplateEditor';
 import { api } from '../lib/api';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -25,19 +27,11 @@ interface StudioSourcePanelProps {
   onDisconnectRef?: React.MutableRefObject<(() => void) | null>;
 }
 
-const FALLBACK_TEMPLATE: CanvasTemplate = {
-  width: 1920,
-  height: 1080,
-  backgroundColor: '#1a3a5c',
-  layers: [
-    { type: 'screenShare', x: 0, y: 0, width: 1920, height: 880 },
-    { type: 'rect', x: 0, y: 880, width: 1920, height: 200, color: '#0d2137' },
-    { type: 'webcam', x: 1580, y: 780, width: 320, height: 280 },
-  ],
-};
+const FALLBACK_TEMPLATE: GridTemplate = DEFAULT_GRID_TEMPLATE;
 
 export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef }: StudioSourcePanelProps) {
-  const [template, setTemplate] = useState<CanvasTemplate | null>(null);
+  const [template, setTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
+  const [savedTemplate, setSavedTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
 
   // Media sources
   const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null);
@@ -51,8 +45,15 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   // Load template
   useEffect(() => {
     api.getTemplate()
-      .then((t) => setTemplate(t.config_json as unknown as CanvasTemplate))
-      .catch(() => setTemplate(FALLBACK_TEMPLATE));
+      .then((t) => {
+        const tpl = t.config_json as unknown as GridTemplate;
+        setTemplate(tpl);
+        setSavedTemplate(tpl);
+      })
+      .catch(() => {
+        setTemplate(FALLBACK_TEMPLATE);
+        setSavedTemplate(FALLBACK_TEMPLATE);
+      });
   }, []);
 
   // Enumerate webcam devices
@@ -145,7 +146,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
 
   // Compositor
   const { canvasRef, compositeStream } = useCanvasCompositor({
-    template: template ?? { width: 1920, height: 1080, backgroundColor: '#000', layers: [] },
+    template,
     webcamStream: useMemo(
       () => webcamStream ? new MediaStream(webcamStream.getVideoTracks()) : null,
       [webcamStream],
@@ -186,7 +187,28 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     };
   }, [studioConnect, studioDisconnect, onConnectRef, onDisconnectRef]);
 
-  if (!template) return null;
+  // Template editor handlers
+  const handleSaveTemplate = useCallback(async () => {
+    try {
+      await api.updateTemplate('default', { config_json: template as unknown as Record<string, unknown> });
+      setSavedTemplate(template);
+      notifications.show({ title: 'Saved', message: 'Template layout saved', color: 'green' });
+    } catch (err) {
+      notifications.show({ title: 'Save Error', message: String(err), color: 'red' });
+    }
+  }, [template]);
+
+  const handleResetTemplate = useCallback(async () => {
+    try {
+      const result = await api.resetTemplate();
+      const tpl = result.config_json as unknown as GridTemplate;
+      setTemplate(tpl);
+      setSavedTemplate(tpl);
+      notifications.show({ title: 'Reset', message: 'Template reset to default', color: 'blue' });
+    } catch (err) {
+      notifications.show({ title: 'Reset Error', message: String(err), color: 'red' });
+    }
+  }, []);
 
   return (
     <Stack gap="sm">
@@ -256,6 +278,15 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
           </Badge>
         </Group>
       </Group>
+
+      {/* Template editor */}
+      <TemplateEditor
+        template={template}
+        savedTemplate={savedTemplate}
+        onTemplateChange={setTemplate}
+        onSave={handleSaveTemplate}
+        onReset={handleResetTemplate}
+      />
 
       {/* Audio controls: sliders + level on one row */}
       <Card withBorder padding="xs">

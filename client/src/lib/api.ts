@@ -90,6 +90,8 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
+  resetTemplate: () =>
+    request<{ config_json: Record<string, unknown>; id: string; name: string }>('/api/studio/template/reset', { method: 'POST' }),
   uploadOverlay: (formData: FormData) =>
     authedFetch('/api/studio/overlay', { method: 'POST', body: formData }).then((r) => r.json()),
 };

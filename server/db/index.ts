@@ -6,6 +6,57 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = join(__dirname, '..', '..', 'data', 'multistream.db');
 
+// Keep in sync with client/src/lib/gridTemplate.ts DEFAULT_GRID_TEMPLATE
+export const DEFAULT_GRID_TEMPLATE = {
+  width: 1920,
+  height: 1080,
+  backgroundColor: '#1a3a5c',
+  columns: [
+    { unit: 'fr', value: 4 },
+    { unit: 'fr', value: 1 },
+  ],
+  rows: [
+    { unit: 'fr', value: 1 },
+    { unit: 'px', value: 200 },
+  ],
+  gap: 0,
+  cells: [
+    {
+      id: 'screen',
+      row: 0, col: 0, rowSpan: 1, colSpan: 1,
+      content: { type: 'screenShare' },
+    },
+    {
+      id: 'camera',
+      row: 1, col: 1, rowSpan: 1, colSpan: 1,
+      content: { type: 'webcam' },
+      backgroundColor: '#0d2137',
+    },
+    {
+      id: 'footer',
+      row: 1, col: 0, rowSpan: 1, colSpan: 1,
+      content: { type: 'image', src: '/uploads/overlays/rm-logo.png', objectFit: 'contain' },
+      backgroundColor: '#0d2137',
+      padding: 10,
+    },
+    {
+      id: 'branding',
+      row: 0, col: 1, rowSpan: 1, colSpan: 1,
+      content: {
+        type: 'text',
+        content: 'Join us at\nRosaryMen.com',
+        fontSize: 36,
+        fontFamily: 'sans-serif',
+        fontWeight: 'bold',
+        color: '#f0b429',
+        align: 'center',
+        verticalAlign: 'top',
+      },
+      padding: 15,
+    },
+  ],
+};
+
 let db: DatabaseSync;
 
 export function getDb(): DatabaseSync {
@@ -20,22 +71,21 @@ export function getDb(): DatabaseSync {
     // Seed default studio template if none exists
     const templateCount = db.prepare('SELECT COUNT(*) as count FROM studio_templates').get() as { count: number };
     if (templateCount.count === 0) {
-      const defaultTemplate = {
-        width: 1920,
-        height: 1080,
-        backgroundColor: '#1a3a5c',
-        layers: [
-          { type: 'screenShare', x: 0, y: 0, width: 1920, height: 880 },
-          { type: 'rect', x: 0, y: 880, width: 1920, height: 200, color: '#0d2137' },
-          { type: 'image', src: '/uploads/overlays/rm-logo.png', x: 20, y: 890, width: 300, height: 180 },
-          { type: 'webcam', x: 1580, y: 780, width: 320, height: 280 },
-          { type: 'text', content: 'Join us at RosaryMen.com', x: 1900, y: 50, font: 'bold 36px sans-serif', color: '#f0b429', align: 'right' },
-        ],
-      };
       db.prepare(
         'INSERT INTO studio_templates (id, name, config_json, is_default) VALUES (?, ?, ?, 1)',
-      ).run('default', 'RosaryMen Standard', JSON.stringify(defaultTemplate));
+      ).run('default', 'RosaryMen Standard', JSON.stringify(DEFAULT_GRID_TEMPLATE));
       console.log('[db] Seeded default studio template');
+    }
+
+    // Migrate old layer-based template to grid format
+    const existing = db.prepare('SELECT config_json FROM studio_templates WHERE id = ?').get('default') as { config_json: string } | undefined;
+    if (existing) {
+      const config = JSON.parse(existing.config_json);
+      if (config.layers && !config.columns) {
+        db.prepare('UPDATE studio_templates SET config_json = ? WHERE id = ?')
+          .run(JSON.stringify(DEFAULT_GRID_TEMPLATE), 'default');
+        console.log('[db] Migrated default template from layer format to grid format');
+      }
     }
 
     console.log(`[db] SQLite database opened at ${DB_PATH}`);
