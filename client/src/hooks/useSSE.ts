@@ -17,7 +17,12 @@ export function useSSE(url: string, enabled = true) {
   const connect = useCallback(() => {
     if (!enabled) return;
 
-    const es = new EventSource(url);
+    // EventSource can't set headers, so pass the auth token as a query param.
+    const token = sessionStorage.getItem('auth_token') ?? '';
+    const fullUrl = token
+      ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+      : url;
+    const es = new EventSource(fullUrl);
     esRef.current = es;
 
     es.onopen = () => setConnected(true);

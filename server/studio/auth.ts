@@ -31,6 +31,18 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
+  // SSE: EventSource cannot send an Authorization header, so the live-events stream
+  // authenticates via a query-param token instead (same token the WebSocket uses).
+  if (req.path === '/stream/events') {
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    if (validateToken(token)) {
+      next();
+    } else {
+      res.status(401).json({ error: 'Authentication required' });
+    }
+    return;
+  }
+
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Authentication required' });

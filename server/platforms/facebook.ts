@@ -9,6 +9,16 @@ function getPageAuth(): { accessToken: string; pageId: string } {
   return auth;
 }
 
+/** Safely extract an error message — FB error bodies are usually JSON, but not always. */
+async function errorMessage(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: { message?: string } };
+    return body.error?.message ?? res.statusText;
+  } catch {
+    return res.statusText;
+  }
+}
+
 /**
  * Create a scheduled live video on a Facebook Page.
  */
@@ -40,8 +50,7 @@ export async function createFacebookLiveVideo(
   });
 
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(`Facebook live video creation failed: ${err.error?.message ?? res.statusText}`);
+    throw new Error(`Facebook live video creation failed: ${await errorMessage(res)}`);
   }
 
   const data = await res.json() as { id: string; secure_stream_url?: string; stream_url?: string };
@@ -50,6 +59,27 @@ export async function createFacebookLiveVideo(
     liveVideoId: data.id,
     streamUrl: data.secure_stream_url ?? data.stream_url ?? '',
   };
+}
+
+/**
+ * Take a Facebook live video live. Per the Live Video API, an UNPUBLISHED /
+ * SCHEDULED_UNPUBLISHED video is "not visible to other users" until it's transitioned to
+ * LIVE_NOW via POST /{live-video-id}. The transition only succeeds once the stream URL is
+ * already receiving data — so this must be called *after* the fan-out has started pushing.
+ * Ref: https://developers.facebook.com/docs/live-video-api (status=LIVE_NOW).
+ */
+export async function publishFacebookLiveVideo(liveVideoId: string): Promise<void> {
+  const { accessToken } = getPageAuth();
+
+  const res = await fetch(`${API}/${liveVideoId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'LIVE_NOW', access_token: accessToken }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Facebook publish failed: ${await errorMessage(res)}`);
+  }
 }
 
 /**
@@ -68,8 +98,7 @@ export async function endFacebookLiveVideo(liveVideoId: string): Promise<void> {
   });
 
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(`Facebook end live failed: ${err.error?.message ?? res.statusText}`);
+    throw new Error(`Facebook end live failed: ${await errorMessage(res)}`);
   }
 }
 
@@ -94,8 +123,7 @@ export async function updateFacebookLiveVideo(
   });
 
   if (!res.ok) {
-    const err = await res.json();
-    throw new Error(`Facebook update failed: ${err.error?.message ?? res.statusText}`);
+    throw new Error(`Facebook update failed: ${await errorMessage(res)}`);
   }
 }
 
@@ -110,7 +138,6 @@ export async function deleteFacebookLiveVideo(liveVideoId: string): Promise<void
   });
 
   if (!res.ok) {
-    const err = await res.json();
-    console.warn(`[facebook] Delete live video failed: ${err.error?.message ?? res.statusText}`);
+    console.warn(`[facebook] Delete live video failed: ${await errorMessage(res)}`);
   }
 }

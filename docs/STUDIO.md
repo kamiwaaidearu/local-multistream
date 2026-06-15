@@ -47,12 +47,26 @@ Audio: webcam mic + shared-tab audio are mixed in `useAudioMixer.ts` and muxed i
 - Confirmed the Main scene is the existing seeded default template (slides + webcam PiP + footer logo + "Join us at RosaryMen.com").
 - Removed the duplicated default-template literal. The canonical layout now lives in exactly one place — `server/db/index.ts` (`DEFAULT_GRID_TEMPLATE`, seed + "Reset to Default"). The client carries only a blank `FALLBACK_TEMPLATE` for pre-load/offline state, so the two can no longer silently drift.
 
+## Live-streaming reliability pass (2026-06-15)
+
+Audited the whole go-live path end to end and fixed:
+
+- **Startup reconciliation** — streams left `live` by a crash/restart are marked `ended` on boot (`reconcileLiveStreams`), so a crash mid-stream no longer permanently blocks all future go-lives via the concurrent-stream guard.
+- **Graceful shutdown** — `shutdown()` now ends any live stream (bounded to 8s) and awaits FFmpeg/ingest teardown, so Ctrl+C no longer leaves YouTube/Facebook broadcasts dangling "live."
+- **YouTube** — `enableAutoStart` set to `false` so it no longer conflicts with our explicit poll-then-transition (the conflict was causing `redundantTransition` errors every stream).
+- **Facebook** — now explicitly transitions the UNPUBLISHED/SCHEDULED_UNPUBLISHED live video to `LIVE_NOW` at go-live (delayed + retried so the fan-out is already pushing data first, which FB requires), instead of assuming it auto-publishes. Confirmed against the [Live Video API docs](https://developers.facebook.com/docs/live-video-api): an unpublished video is "not visible to other users" until a `LIVE_NOW` transition, and that transition needs the stream to be receiving data.
+- **Studio reconnect** — the studio→server WebSocket now auto-reconnects with backoff (6 attempts), and the server hard-stops a lingering ingest FFmpeg so two never publish the same RTMP key.
+- **Go-live source guard** — refuses to go live unless OBS or the Studio is actually publishing.
+- **Fan-out stop** — a `stopping` flag stops the close-handler from respawning a zombie process during teardown; stop is now parallel across platforms (was sequential, up to 15s).
+- **SSE auth** — live events authenticate via a query-param token (EventSource can't send headers), so the FFmpeg log works on password-protected instances.
+- **Misc** — background Twitch VOD fetch (no more 5s blocking End Stream); OBS/Studio dual-publish guard; safe Facebook error parsing.
+
 ## Backlog (rough priority)
 
 1. **Live scene switching (OBS scenes).** Seed Intro + Clean scenes; add a scenes data model (array + active id, or a scenes table); one-click switcher in the operator view. Switching just swaps the active template object — the compositor hot-swaps with no stream teardown because the canvas size is constant (`useCanvasCompositor.ts` only re-creates the stream on width/height/fps change).
 2. **Free-form drag/resize editor with snapping** (replaces the grid editor). Migrate the saved template to the per-element model.
 3. **Template library:** save / save-as / pick from list. The `studio_templates` table already supports multiple rows; only the single-default route + UI exist today.
-4. **Resilience:** studio→server WebSocket auto-reconnect. A transient blip currently stops ingest FFmpeg and drops the live broadcast (the platform fan-out reconnects, but the studio→server hop does not).
+4. ~~**Resilience:** studio→server WebSocket auto-reconnect.~~ ✅ Done (2026-06-15) — see the reliability pass above.
 5. **Remote-admin HTTPS.** `getUserMedia`/`getDisplayMedia` need a secure context. Admins reaching the box over the LAN at `http://<ip>:3000` are silently blocked — they must use the HTTPS server and accept the self-signed cert. Decide on a clean path (or document localhost-only).
 6. **Misc:** mic device picker; avoid changing canvas dimensions mid-stream (recreates the recorder); test transcode CPU cost on the actual streaming machine.
 

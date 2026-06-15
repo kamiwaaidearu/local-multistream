@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { spawn, ChildProcess } from 'child_process';
 import { config } from '../config.js';
 import { validateToken } from './auth.js';
+import { isObsConnected } from '../rtmp/server.js';
 
 let ffmpegPath: string;
 try {
@@ -14,29 +15,36 @@ try {
 let studioConnected = false;
 let activeWs: WebSocket | null = null;
 let ingestFfmpeg: ChildProcess | null = null;
+// A previous ingest process that's still winding down. Tracked so a fast studio reconnect
+// can hard-stop it before starting a new one — otherwise two FFmpegs would briefly publish
+// to the same RTMP key and node-media-server would reject the new one.
+let stoppingProc: ChildProcess | null = null;
 
 export function isStudioConnected(): boolean {
   return studioConnected;
 }
 
-function stopIngestFfmpeg(): void {
-  if (ingestFfmpeg) {
-    console.log('[studio] Stopping ingest FFmpeg');
-    try {
-      ingestFfmpeg.stdin?.end();
-    } catch { /* ignore */ }
+function stopIngestFfmpeg(): Promise<void> {
+  const proc = ingestFfmpeg;
+  ingestFfmpeg = null;
+  studioConnected = false;
+  if (!proc) return Promise.resolve();
 
-    const proc = ingestFfmpeg;
-    ingestFfmpeg = null;
-
-    // Give it 5s to exit gracefully, then force kill
+  stoppingProc = proc;
+  console.log('[studio] Stopping ingest FFmpeg');
+  return new Promise<void>((resolve) => {
+    // Give it 5s to exit gracefully (EOF on stdin), then force kill.
     const timeout = setTimeout(() => {
       try { proc.kill(); } catch { /* ignore */ }
+      resolve();
     }, 5000);
-
-    proc.on('close', () => clearTimeout(timeout));
-  }
-  studioConnected = false;
+    proc.on('close', () => {
+      clearTimeout(timeout);
+      if (stoppingProc === proc) stoppingProc = null;
+      resolve();
+    });
+    try { proc.stdin?.end(); } catch { /* ignore */ }
+  });
 }
 
 function startIngestFfmpeg(): ChildProcess {
@@ -96,6 +104,20 @@ function handleConnection(ws: WebSocket): void {
     console.log('[studio] Rejecting connection — another studio is already connected');
     ws.close(4000, 'Another studio session is already active');
     return;
+  }
+
+  // Don't let Studio and OBS publish to the same RTMP key at once.
+  if (isObsConnected()) {
+    console.log('[studio] Rejecting connection — OBS is currently publishing');
+    ws.close(4001, 'OBS is currently connected. Disconnect OBS before using Web Studio.');
+    return;
+  }
+
+  // If a previous ingest is still winding down (fast reconnect), hard-stop it now so we
+  // never have two FFmpegs publishing to the same RTMP key.
+  if (stoppingProc) {
+    try { stoppingProc.kill('SIGKILL'); } catch { /* ignore */ }
+    stoppingProc = null;
   }
 
   console.log('[studio] WebSocket connected');
@@ -166,10 +188,10 @@ export function initStudioWebSocket(...servers: HttpServer[]): void {
 /**
  * Clean up studio resources on shutdown.
  */
-export function shutdownStudio(): void {
+export async function shutdownStudio(): Promise<void> {
   if (activeWs) {
-    activeWs.close(1001, 'Server shutting down');
+    try { activeWs.close(1001, 'Server shutting down'); } catch { /* ignore */ }
     activeWs = null;
   }
-  stopIngestFfmpeg();
+  await stopIngestFfmpeg();
 }

@@ -19,6 +19,7 @@ interface ActiveProcess {
   rtmpUrl: string;
   retryCount: number;
   startedAt: number;
+  stopping: boolean; // set when we intentionally stop it, so 'close' doesn't trigger a retry
 }
 
 const activeProcesses = new Map<string, ActiveProcess>();
@@ -88,6 +89,7 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
     rtmpUrl: ps.rtmp_url ?? '',
     retryCount,
     startedAt: Date.now(),
+    stopping: false,
   };
 
   activeProcesses.set(key, proc);
@@ -102,6 +104,12 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
 
   child.on('close', (code) => {
     activeProcesses.delete(key);
+
+    // Intentional stop (stopFanOut / killAll) — never treat as a crash, never retry.
+    if (proc.stopping) {
+      console.log(`[ffmpeg] ${ps.platform} stopped`);
+      return;
+    }
 
     if (code === 0) {
       // Clean exit (from 'q' command during end stream)
@@ -181,39 +189,49 @@ export async function stopFanOut(streamId: string): Promise<void> {
     }
   }
 
-  for (const proc of toStop) {
-    // Graceful: send 'q' to FFmpeg stdin
-    try {
-      proc.child.stdin?.write('q\n');
-    } catch { /* ignore */ }
+  // Stop all platforms in parallel (was sequential — a slow 'q' on one shouldn't delay
+  // the others). Each is still bounded by the 5s force-kill.
+  await Promise.all(toStop.map((proc) => new Promise<void>((resolve) => {
+    proc.stopping = true;
 
-    // Wait up to 5s, then force kill
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(() => {
-        try { proc.child.kill(); } catch { /* ignore */ }
-        resolve();
-      }, 5000);
+    let settled = false;
+    const done = () => {
+      if (settled) return; // force-kill timeout + 'close' can both fire
+      settled = true;
+      logEvent(streamId, proc.platform, 'ffmpeg_stopped');
+      pushSSEEvent({ type: 'ffmpeg_stopped', platform: proc.platform });
+      resolve();
+    };
 
-      proc.child.on('close', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
+    const timeout = setTimeout(() => {
+      try { proc.child.kill(); } catch { /* ignore */ }
+      done();
+    }, 5000);
+
+    proc.child.on('close', () => {
+      clearTimeout(timeout);
+      done();
     });
 
-    logEvent(streamId, proc.platform, 'ffmpeg_stopped');
-    pushSSEEvent({ type: 'ffmpeg_stopped', platform: proc.platform });
-  }
+    // Graceful: send 'q' to FFmpeg stdin
+    try { proc.child.stdin?.write('q\n'); } catch { /* ignore */ }
+  })));
 }
 
 /**
  * Kill all FFmpeg processes (for graceful shutdown).
  */
-export function killAll(): void {
-  for (const [, proc] of activeProcesses) {
-    try {
-      proc.child.stdin?.write('q\n');
-      setTimeout(() => { try { proc.child.kill(); } catch { /* ignore */ } }, 2000);
-    } catch { /* ignore */ }
-  }
+export async function killAll(): Promise<void> {
+  const procs = [...activeProcesses.values()];
   activeProcesses.clear();
+
+  await Promise.all(procs.map((proc) => new Promise<void>((resolve) => {
+    proc.stopping = true;
+    const timeout = setTimeout(() => {
+      try { proc.child.kill(); } catch { /* ignore */ }
+      resolve();
+    }, 3000);
+    proc.child.on('close', () => { clearTimeout(timeout); resolve(); });
+    try { proc.child.stdin?.write('q\n'); } catch { /* ignore */ }
+  })));
 }

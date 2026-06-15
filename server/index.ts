@@ -42,6 +42,11 @@ async function start(): Promise<void> {
   validateConfig();
   getDb(); // Initialize database
 
+  // Reconcile any streams left 'live' by a crash/restart — no FFmpeg survives a restart,
+  // so a leftover 'live' row is stale and would otherwise block all future go-lives.
+  const { reconcileLiveStreams } = await import('./stream/manager.js');
+  reconcileLiveStreams();
+
   // Check FFmpeg availability
   try {
     const ffmpegPath = (await import('ffmpeg-static')).default;
@@ -117,15 +122,31 @@ async function autoSetupPendingFacebookEvents(): Promise<void> {
 }
 
 // Graceful shutdown
+let shuttingDown = false;
 async function shutdown(): Promise<void> {
+  if (shuttingDown) return; // ignore repeated signals
+  shuttingDown = true;
   console.log('\n[server] Shutting down...');
+
+  // End any live stream first so platform broadcasts aren't left dangling. Capped with a
+  // timeout so a slow or hung platform API can't block shutdown indefinitely.
+  try {
+    const { endLiveStreamsForShutdown } = await import('./stream/manager.js');
+    await Promise.race([
+      endLiveStreamsForShutdown(),
+      new Promise((r) => setTimeout(r, 8000)),
+    ]);
+  } catch (err) {
+    console.error('[server] Error ending live streams on shutdown:', err);
+  }
+
   try {
     const { killAll } = await import('./fanout/ffmpeg.js');
-    killAll();
+    await killAll();
   } catch { /* not initialized */ }
   try {
     const { shutdownStudio } = await import('./studio/ingest.js');
-    shutdownStudio();
+    await shutdownStudio();
   } catch { /* not initialized */ }
   closeDb();
   process.exit(0);

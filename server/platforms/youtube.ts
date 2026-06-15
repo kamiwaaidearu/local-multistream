@@ -90,7 +90,11 @@ export async function createYouTubeBroadcast(
         scheduledStartTime: startTime,
       },
       contentDetails: {
-        enableAutoStart: true,
+        // We drive the go-live transition ourselves (transitionToLive polls for the
+        // stream to become active, then transitions). Autostart must be OFF — with it on,
+        // YouTube auto-transitions when data arrives and our transition() call then fails
+        // with redundantTransition.
+        enableAutoStart: false,
         enableAutoStop: false,
         latencyPreference: 'normal',
         monitorStream: { enableMonitorStream: false },

@@ -4,7 +4,7 @@ import { getYouTubeAuth } from '../auth/youtube.js';
 import { getFacebookPageToken } from '../auth/facebook.js';
 import { getTwitchCredentials } from '../auth/twitch.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
-import { createFacebookLiveVideo, endFacebookLiveVideo } from '../platforms/facebook.js';
+import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
 import type { Stream, PlatformStream, Platform } from '../types.js';
 
@@ -160,6 +160,15 @@ export async function goLive(streamId: string): Promise<void> {
   const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(streamId) as unknown as PlatformStream[];
   if (platformStreams.length === 0) throw new Error('No platforms are set up');
 
+  // Verify an ingest source is actually publishing. Without this we'd mark the stream
+  // "live" while nothing flows — the fan-out would retry then give up, and YouTube would
+  // time out after 2 minutes.
+  const { isObsConnected } = await import('../rtmp/server.js');
+  const { isStudioConnected } = await import('../studio/ingest.js');
+  if (!isObsConnected() && !isStudioConnected()) {
+    throw new Error('No video source is connected. Start OBS or the Web Studio before going live.');
+  }
+
   // Update Twitch title at go-live time
   const twitchPs = platformStreams.find((ps) => ps.platform === 'twitch');
   if (twitchPs) {
@@ -192,16 +201,31 @@ export async function goLive(streamId: string): Promise<void> {
     });
   }
 
-  // Facebook auto-transitions when RTMP data arrives
+  // Facebook: an UNPUBLISHED live video must be explicitly transitioned to LIVE_NOW —
+  // streaming RTMP alone leaves it in preview, never visible on the Page. (The fan-out
+  // process sets the DB status to 'live'; this call is what actually publishes it.)
   const fbPs = platformStreams.find((ps) => ps.platform === 'facebook');
-  if (fbPs) {
-    db.prepare("UPDATE platform_streams SET status = 'live' WHERE id = ?").run(fbPs.id);
+  if (fbPs?.broadcast_id) {
+    const fbId = fbPs.broadcast_id;
+    // FB only accepts the LIVE_NOW transition once it's receiving the encoder's data, so
+    // wait a few seconds for the fan-out to connect, and retry a couple of times in case
+    // the ingest connection is slow to establish.
+    const publishFb = (attempt = 0): void => {
+      publishFacebookLiveVideo(fbId)
+        .then(() => logEvent(streamId, 'facebook', 'published_live'))
+        .catch((err) => {
+          if (attempt < 2) {
+            setTimeout(() => publishFb(attempt + 1), 5000);
+          } else {
+            console.error('[manager] Facebook publish failed:', err);
+            logEvent(streamId, 'facebook', 'publish_error', String(err));
+          }
+        });
+    };
+    setTimeout(() => publishFb(), 4000);
   }
 
-  // Twitch auto-goes live when RTMP connects
-  if (twitchPs) {
-    db.prepare("UPDATE platform_streams SET status = 'live' WHERE id = ?").run(twitchPs.id);
-  }
+  // Twitch goes live automatically when RTMP connects; the fan-out marks it 'live'.
 }
 
 /**
@@ -250,23 +274,59 @@ export async function endStream(streamId: string): Promise<void> {
     }
   }
 
-  // Twitch: fetch VOD URL
+  // Twitch: mark ended now; fetch the VOD URL in the background. Twitch needs time to
+  // publish the archive, so blocking the End Stream response on it just makes the UI hang.
   const twitchPs = platformStreams.find((ps) => ps.platform === 'twitch');
   if (twitchPs) {
-    try {
-      // Wait a few seconds for Twitch to create the VOD
-      await new Promise((r) => setTimeout(r, 5000));
-      const vodUrl = await getTwitchVodUrl();
-      const extra = twitchPs.extra_json ? JSON.parse(twitchPs.extra_json) : {};
-      if (vodUrl) extra.vod_url = vodUrl;
-      db.prepare("UPDATE platform_streams SET status = 'ended', extra_json = ? WHERE id = ?").run(JSON.stringify(extra), twitchPs.id);
-      logEvent(streamId, 'twitch', 'stream_ended');
-    } catch (err) {
-      console.error('[manager] Twitch VOD fetch failed:', err);
-    }
+    db.prepare("UPDATE platform_streams SET status = 'ended' WHERE id = ?").run(twitchPs.id);
+    logEvent(streamId, 'twitch', 'stream_ended');
+    setTimeout(() => {
+      getTwitchVodUrl().then((vodUrl) => {
+        if (!vodUrl) return;
+        const row = db.prepare('SELECT extra_json FROM platform_streams WHERE id = ?').get(twitchPs.id) as { extra_json: string | null } | undefined;
+        const extra = row?.extra_json ? JSON.parse(row.extra_json) : {};
+        extra.vod_url = vodUrl;
+        db.prepare("UPDATE platform_streams SET extra_json = ? WHERE id = ?").run(JSON.stringify(extra), twitchPs.id);
+        logEvent(streamId, 'twitch', 'vod_ready', vodUrl);
+      }).catch((err) => console.error('[manager] Twitch VOD fetch failed:', err));
+    }, 10000);
   }
 
   // Mark stream as ended
   db.prepare('UPDATE streams SET status = ?, ended_at = ? WHERE id = ?').run('ended', Date.now(), streamId);
   logEvent(streamId, null, 'stream_ended');
+}
+
+/**
+ * Reconcile streams stuck in 'live' on startup. No FFmpeg survives a process restart,
+ * so a 'live' row after boot is stale (a crash/restart mid-stream). Left alone it would
+ * block every future go-live via the concurrent-stream guard.
+ */
+export function reconcileLiveStreams(): void {
+  const db = getDb();
+  const live = db.prepare("SELECT id FROM streams WHERE status = 'live'").all() as Array<{ id: string }>;
+  for (const s of live) {
+    db.prepare('UPDATE streams SET status = ?, ended_at = ? WHERE id = ?').run('ended', Date.now(), s.id);
+    db.prepare("UPDATE platform_streams SET status = 'ended' WHERE stream_id = ? AND status IN ('live', 'reconnecting')").run(s.id);
+    logEvent(s.id, null, 'reconciled_after_restart', 'Stream was live at shutdown; marked ended on startup');
+  }
+  if (live.length > 0) {
+    console.log(`[manager] Reconciled ${live.length} stream(s) stuck in 'live' after restart`);
+  }
+}
+
+/**
+ * Best-effort: gracefully end any live streams during server shutdown, so platform
+ * broadcasts aren't left dangling and FFmpeg is stopped cleanly.
+ */
+export async function endLiveStreamsForShutdown(): Promise<void> {
+  const db = getDb();
+  const live = db.prepare("SELECT id FROM streams WHERE status = 'live'").all() as Array<{ id: string }>;
+  for (const s of live) {
+    try {
+      await endStream(s.id);
+    } catch (err) {
+      console.error('[manager] Failed to end stream during shutdown:', err);
+    }
+  }
 }
