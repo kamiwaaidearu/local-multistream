@@ -10,6 +10,9 @@ import {
   Progress,
   Alert,
   Slider,
+  Collapse,
+  ThemeIcon,
+  Box,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useCanvasCompositor, type GridTemplate } from '../hooks/useCanvasCompositor';
@@ -41,6 +44,10 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [webcamEnabled, setWebcamEnabled] = useState(false);
   const [screenEnabled, setScreenEnabled] = useState(false);
+
+  // Advanced sections (hidden by default to keep the operator view simple)
+  const [showAudio, setShowAudio] = useState(false);
+  const [showLayout, setShowLayout] = useState(false);
 
   // Load template
   useEffect(() => {
@@ -79,6 +86,28 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     // eslint-disable-next-line react-hooks/exhaustive-deps -- cleanup only on unmount
   }, []);
 
+  // Mic stream — useMemo to avoid re-creating on every render
+  const micStream = useMemo(
+    () => webcamStream ? new MediaStream(webcamStream.getAudioTracks()) : null,
+    [webcamStream],
+  );
+
+  // Compositor
+  const { canvasRef, compositeStream } = useCanvasCompositor({
+    template,
+    webcamStream: useMemo(
+      () => webcamStream ? new MediaStream(webcamStream.getVideoTracks()) : null,
+      [webcamStream],
+    ),
+    screenStream,
+  });
+
+  // Audio mixer
+  const { mixedStream, micGain, tabGain, setMicGain, setTabGain, audioLevel, resume } = useAudioMixer({
+    micStream,
+    tabAudioStream: screenAudioStream,
+  });
+
   // Start/stop webcam
   const toggleWebcam = useCallback(async () => {
     if (webcamEnabled && webcamStream) {
@@ -89,6 +118,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     }
 
     try {
+      resume(); // ensure the audio context is running (this click is a user gesture)
       const stream = await navigator.mediaDevices.getUserMedia({
         video: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true,
         audio: true,
@@ -98,7 +128,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     } catch (err) {
       notifications.show({ title: 'Camera Error', message: String(err), color: 'red' });
     }
-  }, [webcamEnabled, webcamStream, selectedDeviceId]);
+  }, [webcamEnabled, webcamStream, selectedDeviceId, resume]);
 
   // Start/stop screen share
   const toggleScreen = useCallback(async () => {
@@ -111,6 +141,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     }
 
     try {
+      resume();
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: true,
@@ -136,29 +167,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
         notifications.show({ title: 'Screen Share Error', message: String(err), color: 'red' });
       }
     }
-  }, [screenEnabled, screenStream]);
-
-  // Mic stream — useMemo to avoid re-creating on every render
-  const micStream = useMemo(
-    () => webcamStream ? new MediaStream(webcamStream.getAudioTracks()) : null,
-    [webcamStream],
-  );
-
-  // Compositor
-  const { canvasRef, compositeStream } = useCanvasCompositor({
-    template,
-    webcamStream: useMemo(
-      () => webcamStream ? new MediaStream(webcamStream.getVideoTracks()) : null,
-      [webcamStream],
-    ),
-    screenStream,
-  });
-
-  // Audio mixer
-  const { mixedStream, micGain, tabGain, setMicGain, setTabGain, audioLevel } = useAudioMixer({
-    micStream,
-    tabAudioStream: screenAudioStream,
-  });
+  }, [screenEnabled, screenStream, resume]);
 
   // Studio stream (WebSocket transport)
   const {
@@ -222,7 +231,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
         </Alert>
       )}
 
-      {/* Canvas Preview */}
+      {/* Live preview — exactly what viewers will see */}
       <Card withBorder padding={0} style={{ overflow: 'hidden' }}>
         <canvas
           ref={canvasRef}
@@ -234,96 +243,170 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
           }}
         />
       </Card>
+      <Text size="xs" c="dimmed" ta="center" style={{ marginTop: -4 }}>
+        Live preview — what your viewers will see
+      </Text>
 
-      {/* Compact source controls: camera + screen on one row */}
-      <Group grow align="flex-start">
-        <Group gap="xs" wrap="nowrap">
-          <Select
-            size="xs"
-            placeholder="Camera..."
-            data={webcamDevices.map((d) => ({
-              value: d.deviceId,
-              label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
-            }))}
-            value={selectedDeviceId}
-            onChange={setSelectedDeviceId}
-            disabled={webcamEnabled}
-            style={{ flex: 1, minWidth: 0 }}
-          />
-          <Button
-            size="xs"
-            color={webcamEnabled ? 'red' : 'blue'}
-            variant={webcamEnabled ? 'outline' : 'filled'}
-            onClick={toggleWebcam}
+      {/* Step 1 — Share slides */}
+      <Card withBorder padding="sm">
+        <Group wrap="nowrap" align="flex-start" gap="sm">
+          <ThemeIcon
+            radius="xl"
+            size="md"
+            color={screenEnabled ? 'green' : 'gray'}
+            variant={screenEnabled ? 'filled' : 'light'}
           >
-            {webcamEnabled ? 'Stop Cam' : 'Start Cam'}
-          </Button>
-        </Group>
-
-        <Group gap="xs" wrap="nowrap">
-          <Button
-            size="xs"
-            color={screenEnabled ? 'red' : 'blue'}
-            variant={screenEnabled ? 'outline' : 'filled'}
-            onClick={toggleScreen}
-            style={{ flex: 1 }}
-          >
-            {screenEnabled ? 'Stop Share' : 'Share Tab'}
-          </Button>
-          <Badge
-            size="sm"
-            color={studioStatus === 'connected' ? 'green' : studioStatus === 'connecting' ? 'yellow' : 'gray'}
-          >
-            {studioStatus === 'connected' ? 'Connected' : studioStatus === 'connecting' ? 'Connecting' : 'Disconnected'}
-          </Badge>
-        </Group>
-      </Group>
-
-      {/* Template editor */}
-      <TemplateEditor
-        template={template}
-        savedTemplate={savedTemplate}
-        onTemplateChange={setTemplate}
-        onSave={handleSaveTemplate}
-        onReset={handleResetTemplate}
-      />
-
-      {/* Audio controls: sliders + level on one row */}
-      <Card withBorder padding="xs">
-        <Group grow align="center">
-          <Stack gap={2}>
-            <Text size="xs">Mic</Text>
-            <Slider
-              size="xs"
-              min={0}
-              max={2}
-              step={0.1}
-              value={micGain}
-              onChange={setMicGain}
-              label={(v) => `${Math.round(v * 100)}%`}
-            />
-          </Stack>
-          <Stack gap={2}>
-            <Text size="xs">Tab Audio</Text>
-            <Slider
-              size="xs"
-              min={0}
-              max={2}
-              step={0.1}
-              value={tabGain}
-              onChange={setTabGain}
-              label={(v) => `${Math.round(v * 100)}%`}
-            />
-          </Stack>
-          <Stack gap={2}>
-            <Text size="xs">Level</Text>
-            <Progress value={audioLevel * 100} color={audioLevel > 0.8 ? 'red' : 'green'} size="sm" />
+            {screenEnabled ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>1</Text>}
+          </ThemeIcon>
+          <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
+            <Group justify="space-between" wrap="nowrap" gap="xs">
+              <Text size="sm" fw={500}>Share your slides</Text>
+              <Badge size="sm" color={screenEnabled ? 'green' : 'gray'} variant="light">
+                {screenEnabled ? 'Sharing' : 'Not shared'}
+              </Badge>
+            </Group>
+            <Text size="xs" c="dimmed">
+              Open Google Slides, click Present, then share that Chrome tab — and tick “Also share tab audio”.
+            </Text>
+            <Group gap="xs" mt={2}>
+              <Button
+                size="xs"
+                color={screenEnabled ? 'gray' : 'blue'}
+                variant={screenEnabled ? 'outline' : 'filled'}
+                onClick={toggleScreen}
+              >
+                {screenEnabled ? 'Stop sharing' : 'Share slides'}
+              </Button>
+            </Group>
           </Stack>
         </Group>
       </Card>
 
+      {/* Step 2 — Camera & mic */}
+      <Card withBorder padding="sm">
+        <Group wrap="nowrap" align="flex-start" gap="sm">
+          <ThemeIcon
+            radius="xl"
+            size="md"
+            color={webcamEnabled ? 'green' : 'gray'}
+            variant={webcamEnabled ? 'filled' : 'light'}
+          >
+            {webcamEnabled ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>2</Text>}
+          </ThemeIcon>
+          <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
+            <Group justify="space-between" wrap="nowrap" gap="xs">
+              <Text size="sm" fw={500}>Camera &amp; microphone</Text>
+              <Badge size="sm" color={webcamEnabled ? 'green' : 'gray'} variant="light">
+                {webcamEnabled ? 'Camera on' : 'Off'}
+              </Badge>
+            </Group>
+
+            {!webcamEnabled && (
+              <Select
+                size="xs"
+                placeholder="Choose camera..."
+                data={webcamDevices.map((d) => ({
+                  value: d.deviceId,
+                  label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
+                }))}
+                value={selectedDeviceId}
+                onChange={setSelectedDeviceId}
+              />
+            )}
+
+            {webcamEnabled && (
+              <Group gap="xs" wrap="nowrap" align="center">
+                <Text size="xs" c="dimmed" style={{ width: 26 }}>Mic</Text>
+                <Progress
+                  value={audioLevel * 100}
+                  color={audioLevel > 0.8 ? 'red' : 'green'}
+                  size="sm"
+                  style={{ flex: 1 }}
+                />
+              </Group>
+            )}
+
+            <Group gap="xs" mt={2}>
+              <Button
+                size="xs"
+                color={webcamEnabled ? 'gray' : 'blue'}
+                variant={webcamEnabled ? 'outline' : 'filled'}
+                onClick={toggleWebcam}
+              >
+                {webcamEnabled ? 'Turn off' : 'Turn on camera'}
+              </Button>
+            </Group>
+          </Stack>
+        </Group>
+      </Card>
+
+      {/* Advanced — audio levels */}
+      <Box>
+        <Button
+          size="compact-xs"
+          variant="subtle"
+          color="gray"
+          onClick={() => setShowAudio((s) => !s)}
+        >
+          {showAudio ? '▾' : '▸'} Adjust audio levels
+        </Button>
+        <Collapse in={showAudio}>
+          <Card withBorder padding="xs" mt={4}>
+            <Group grow align="center">
+              <Stack gap={2}>
+                <Text size="xs">Mic volume</Text>
+                <Slider
+                  size="xs"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={micGain}
+                  onChange={setMicGain}
+                  label={(v) => `${Math.round(v * 100)}%`}
+                />
+              </Stack>
+              <Stack gap={2}>
+                <Text size="xs">Slide audio</Text>
+                <Slider
+                  size="xs"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={tabGain}
+                  onChange={setTabGain}
+                  label={(v) => `${Math.round(v * 100)}%`}
+                />
+              </Stack>
+            </Group>
+          </Card>
+        </Collapse>
+      </Box>
+
+      {/* Advanced — layout editor (rarely needed; hidden by default) */}
+      <Box>
+        <Button
+          size="compact-xs"
+          variant="subtle"
+          color="gray"
+          onClick={() => setShowLayout((s) => !s)}
+        >
+          {showLayout ? '▾' : '▸'} Edit layout
+        </Button>
+        <Collapse in={showLayout}>
+          <Box mt={4}>
+            <TemplateEditor
+              template={template}
+              savedTemplate={savedTemplate}
+              onTemplateChange={setTemplate}
+              onSave={handleSaveTemplate}
+              onReset={handleResetTemplate}
+            />
+          </Box>
+        </Collapse>
+      </Box>
+
       <Alert variant="light" color="blue">
-        Chrome or Edge required. Share a Chrome <strong>tab</strong> (not window) and check "Share tab audio" for presentation audio.
+        Use Chrome or Edge. Share a <strong>tab</strong> (not a window) and tick “Also share tab audio” so your slide sound goes out.
       </Alert>
     </Stack>
   );

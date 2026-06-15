@@ -12,6 +12,7 @@ interface UseAudioMixerResult {
   setMicGain: (value: number) => void;
   setTabGain: (value: number) => void;
   audioLevel: number; // 0-1 RMS level for metering
+  resume: () => void; // resume the AudioContext from a user gesture (it may start suspended)
 }
 
 export function useAudioMixer({ micStream, tabAudioStream }: UseAudioMixerOptions): UseAudioMixerResult {
@@ -89,6 +90,8 @@ export function useAudioMixer({ micStream, tabAudioStream }: UseAudioMixerOption
       const source = ctx.createMediaStreamSource(micStream);
       source.connect(gainNode);
       micSourceRef.current = source;
+      // A context created without a user gesture starts suspended → silent output.
+      void ctx.resume().catch(() => {});
     }
   }, [micStream]);
 
@@ -107,6 +110,7 @@ export function useAudioMixer({ micStream, tabAudioStream }: UseAudioMixerOption
       const source = ctx.createMediaStreamSource(tabAudioStream);
       source.connect(gainNode);
       tabSourceRef.current = source;
+      void ctx.resume().catch(() => {});
     }
   }, [tabAudioStream]);
 
@@ -124,5 +128,12 @@ export function useAudioMixer({ micStream, tabAudioStream }: UseAudioMixerOption
     }
   }, []);
 
-  return { mixedStream, micGain, tabGain, setMicGain, setTabGain, audioLevel };
+  const resume = useCallback(() => {
+    const ctx = audioCtxRef.current;
+    if (ctx && ctx.state === 'suspended') {
+      void ctx.resume().catch(() => {});
+    }
+  }, []);
+
+  return { mixedStream, micGain, tabGain, setMicGain, setTabGain, audioLevel, resume };
 }
