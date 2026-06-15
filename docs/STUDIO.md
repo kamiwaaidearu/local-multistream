@@ -67,7 +67,7 @@ Audited the whole go-live path end to end and fixed:
 2. **Free-form drag/resize editor with snapping** (replaces the grid editor). Migrate the saved template to the per-element model.
 3. **Template library:** save / save-as / pick from list. The `studio_templates` table already supports multiple rows; only the single-default route + UI exist today.
 4. ~~**Resilience:** studio→server WebSocket auto-reconnect.~~ ✅ Done (2026-06-15) — see the reliability pass above.
-5. **Remote-admin HTTPS.** `getUserMedia`/`getDisplayMedia` need a secure context. Admins reaching the box over the LAN at `http://<ip>:3000` are silently blocked — they must use the HTTPS server and accept the self-signed cert. Decide on a clean path (or document localhost-only).
+5. **Remote-admin HTTPS / off-localhost.** `getUserMedia`/`getDisplayMedia` need a secure context, and OAuth + remote admins need a real hostname. The code is now mostly ready: redirect URIs are env-driven, the client/WebSocket are host-relative, and `cert.ts` accepts a real cert via `TLS_CERT_FILE`/`TLS_KEY_FILE`. Remaining: pick a hostname approach — recommended a tunnel (Cloudflare/Tailscale: stable HTTPS, no open ports) over DDNS+port-forward (which exposes RTMP/admin publicly and needs hardening) — update the three provider consoles to the `https://` domain (FB also needs it in App Domains), and **set `APP_SECRET`** (startup now warns when it's empty).
 6. **Misc:** mic device picker; avoid changing canvas dimensions mid-stream (recreates the recorder); test transcode CPU cost on the actual streaming machine.
 
 ## Open questions

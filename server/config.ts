@@ -67,4 +67,11 @@ export function validateConfig(): void {
   } else {
     console.log(`[config] Configured platforms: ${configured.join(', ')}`);
   }
+
+  if (!config.appSecret) {
+    console.warn(
+      '[config] APP_SECRET is not set — the app has no password. Anyone who can reach it can ' +
+      'control your streams. Set APP_SECRET before exposing it beyond localhost.',
+    );
+  }
 }

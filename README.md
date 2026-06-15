@@ -124,7 +124,7 @@ You need to create developer apps on each platform you want to stream to. **You 
    - Click **Create**
 3. In your app dashboard, click **"Add Product"** → find **"Facebook Login"** → **Set Up**
 4. Go to **Facebook Login** → **Settings**:
-   - Valid OAuth Redirect URIs: add `http://localhost:3000/auth/facebook/callback`
+   - Valid OAuth Redirect URIs: add `https://localhost:3443/auth/facebook/callback` (Facebook requires HTTPS; the app runs an HTTPS server on port 3443 with a self-signed cert)
    - Click **Save Changes**
 5. Go to **Settings** → **Basic**:
    - Copy **App ID** → paste into `.env` as `FB_APP_ID`
@@ -174,7 +174,7 @@ YT_REDIRECT_URI=http://localhost:3000/auth/youtube/callback
 # Facebook (Meta Developer Portal → App Settings)
 FB_APP_ID=
 FB_APP_SECRET=
-FB_REDIRECT_URI=http://localhost:3000/auth/facebook/callback
+FB_REDIRECT_URI=https://localhost:3443/auth/facebook/callback
 
 # Twitch (Twitch Developer Console → Application)
 TWITCH_CLIENT_ID=
