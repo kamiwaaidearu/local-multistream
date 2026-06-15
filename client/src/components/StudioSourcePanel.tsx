@@ -18,7 +18,7 @@ import { notifications } from '@mantine/notifications';
 import { useCanvasCompositor, type GridTemplate } from '../hooks/useCanvasCompositor';
 import { useAudioMixer } from '../hooks/useAudioMixer';
 import { useStudioStream } from '../hooks/useStudioStream';
-import { DEFAULT_GRID_TEMPLATE } from '../lib/gridTemplate';
+import { FALLBACK_TEMPLATE } from '../lib/gridTemplate';
 import { TemplateEditor } from './TemplateEditor';
 import { api } from '../lib/api';
 
@@ -29,8 +29,6 @@ interface StudioSourcePanelProps {
   onConnectRef?: React.MutableRefObject<(() => void) | null>;
   onDisconnectRef?: React.MutableRefObject<(() => void) | null>;
 }
-
-const FALLBACK_TEMPLATE: GridTemplate = DEFAULT_GRID_TEMPLATE;
 
 export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef }: StudioSourcePanelProps) {
   const [template, setTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);

@@ -45,6 +45,7 @@ Audio: webcam mic + shared-tab audio are mixed in `useAudioMixer.ts` and muxed i
 - Rebuilt `client/src/components/StudioSourcePanel.tsx` into a guided operator flow: live preview → "Share your slides" → "Camera & microphone" (with a live mic level meter) → advanced sections ("Adjust audio levels", "Edit layout") collapsed by default. The grid editor is no longer front-and-center.
 - Hardened `client/src/hooks/useAudioMixer.ts`: the `AudioContext` could start suspended (created without a user gesture) → silent stream. Now exposes `resume()` and resumes on the Start Camera / Share Slides clicks and on source connect.
 - Confirmed the Main scene is the existing seeded default template (slides + webcam PiP + footer logo + "Join us at RosaryMen.com").
+- Removed the duplicated default-template literal. The canonical layout now lives in exactly one place — `server/db/index.ts` (`DEFAULT_GRID_TEMPLATE`, seed + "Reset to Default"). The client carries only a blank `FALLBACK_TEMPLATE` for pre-load/offline state, so the two can no longer silently drift.
 
 ## Backlog (rough priority)
 

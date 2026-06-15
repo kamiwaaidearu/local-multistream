@@ -6,7 +6,9 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = join(__dirname, '..', '..', 'data', 'multistream.db');
 
-// Keep in sync with client/src/lib/gridTemplate.ts DEFAULT_GRID_TEMPLATE
+// Canonical default studio template — the single source of truth. Seeds the DB
+// on first run, backs the migration path, and is what "Reset to Default" restores.
+// The client only carries a blank FALLBACK_TEMPLATE for pre-load/offline state.
 export const DEFAULT_GRID_TEMPLATE = {
   width: 1920,
   height: 1080,

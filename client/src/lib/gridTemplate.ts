@@ -47,68 +47,20 @@ export interface GridTemplate {
   cells: GridCell[];
 }
 
-// --- Default Template ---
-// Keep in sync with server/db/index.ts DEFAULT_GRID_TEMPLATE
-export const DEFAULT_GRID_TEMPLATE: GridTemplate = {
+// --- Fallback Template ---
+// A blank canvas used ONLY as initial state while the real template loads from
+// the server, and as a last resort if that request fails. The canonical default
+// layout lives in exactly one place — server/db/index.ts (DEFAULT_GRID_TEMPLATE),
+// which seeds the DB and backs "Reset to Default". Do not reintroduce a full
+// layout here; it would almost never render and would silently drift from the server.
+export const FALLBACK_TEMPLATE: GridTemplate = {
   width: 1920,
   height: 1080,
   backgroundColor: '#1a3a5c',
-  columns: [
-    { unit: 'fr', value: 4 },
-    { unit: 'fr', value: 1 },
-  ],
-  rows: [
-    { unit: 'fr', value: 1 },
-    { unit: 'px', value: 200 },
-  ],
+  columns: [{ unit: 'fr', value: 1 }],
+  rows: [{ unit: 'fr', value: 1 }],
   gap: 0,
-  cells: [
-    {
-      id: 'screen',
-      row: 0,
-      col: 0,
-      rowSpan: 1,
-      colSpan: 1,
-      content: { type: 'screenShare' },
-    },
-    {
-      id: 'camera',
-      row: 1,
-      col: 1,
-      rowSpan: 1,
-      colSpan: 1,
-      content: { type: 'webcam' },
-      backgroundColor: '#0d2137',
-    },
-    {
-      id: 'footer',
-      row: 1,
-      col: 0,
-      rowSpan: 1,
-      colSpan: 1,
-      content: { type: 'image', src: '/uploads/overlays/rm-logo.png', objectFit: 'contain' },
-      backgroundColor: '#0d2137',
-      padding: 10,
-    },
-    {
-      id: 'branding',
-      row: 0,
-      col: 1,
-      rowSpan: 1,
-      colSpan: 1,
-      content: {
-        type: 'text',
-        content: 'Join us at\nRosaryMen.com',
-        fontSize: 36,
-        fontFamily: 'sans-serif',
-        fontWeight: 'bold',
-        color: '#f0b429',
-        align: 'center',
-        verticalAlign: 'top',
-      },
-      padding: 15,
-    },
-  ],
+  cells: [],
 };
 
 // --- Grid Layout Utilities ---
