@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   Stack,
   Group,
@@ -81,14 +81,24 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
       .catch(() => {});
   }, [selectedDeviceId, selectedMicId]);
 
-  // Cleanup media tracks on unmount
+  // Keep refs to the live streams so the unmount cleanup stops the CURRENT tracks. A bare `[]`
+  // effect closes over the initial nulls and would stop nothing — leaving the camera, mic, and
+  // screen/tab share running after the stream ends.
+  const webcamStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenAudioStreamRef = useRef<MediaStream | null>(null);
+  webcamStreamRef.current = webcamStream;
+  screenStreamRef.current = screenStream;
+  screenAudioStreamRef.current = screenAudioStream;
+
+  // Stop all source media (camera, mic, screen/tab share) when the panel unmounts — which
+  // happens when the stream ends or you leave the page.
   useEffect(() => {
     return () => {
-      webcamStream?.getTracks().forEach((t) => t.stop());
-      screenStream?.getTracks().forEach((t) => t.stop());
-      screenAudioStream?.getTracks().forEach((t) => t.stop());
+      webcamStreamRef.current?.getTracks().forEach((t) => t.stop());
+      screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+      screenAudioStreamRef.current?.getTracks().forEach((t) => t.stop());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- cleanup only on unmount
   }, []);
 
   // Mic stream — useMemo to avoid re-creating on every render
