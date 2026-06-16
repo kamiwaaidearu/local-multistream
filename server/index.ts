@@ -33,7 +33,14 @@ app.use('/api/studio', studioRouter);
 // Serve React app in production
 const clientDist = path.join(__dirname, '..', 'client', 'dist');
 app.use(express.static(clientDist));
-app.get('*', (_req, res) => {
+app.get('*', (req, res) => {
+  // Only serve the SPA shell for client routes (extensionless paths). A missing static file
+  // (anything with an extension) must 404 — otherwise an HTML body can get cached under a
+  // .css/.js URL and silently break styling/scripts.
+  if (path.extname(req.path)) {
+    res.status(404).end();
+    return;
+  }
   res.sendFile(path.join(clientDist, 'index.html'));
 });
 
