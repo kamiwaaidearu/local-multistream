@@ -319,6 +319,20 @@ apiRouter.get('/auth/facebook/selected-page', async (_req: Request, res: Respons
   res.json(getSelectedFacebookPage());
 });
 
+apiRouter.get('/auth/youtube/channel', async (_req: Request, res: Response) => {
+  try {
+    const { getYouTubeChannelInfo } = await import('../platforms/youtube.js');
+    res.json(await getYouTubeChannelInfo());
+  } catch {
+    res.json(null);
+  }
+});
+
+apiRouter.get('/auth/twitch/channel', async (_req: Request, res: Response) => {
+  const { getTwitchChannelInfo } = await import('../auth/twitch.js');
+  res.json(getTwitchChannelInfo());
+});
+
 apiRouter.post('/auth/facebook/page', async (req: Request, res: Response) => {
   try {
     const { page_id, page_name, access_token } = req.body;

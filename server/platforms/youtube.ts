@@ -13,6 +13,15 @@ function getYouTube(): youtube_v3.Youtube {
   return google.youtube({ version: 'v3', auth });
 }
 
+/** The connected channel's id + title (for display in Settings). */
+export async function getYouTubeChannelInfo(): Promise<{ id: string; title: string } | null> {
+  const yt = getYouTube();
+  const res = await yt.channels.list({ part: ['snippet'], mine: true });
+  const ch = res.data.items?.[0];
+  if (!ch) return null;
+  return { id: ch.id ?? '', title: ch.snippet?.title ?? ch.id ?? '' };
+}
+
 /**
  * Get or create a reusable ingest stream. Reuses the same stream key across broadcasts.
  */

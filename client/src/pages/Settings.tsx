@@ -34,6 +34,8 @@ export function Settings() {
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [savingPage, setSavingPage] = useState(false);
   const [savedPage, setSavedPage] = useState<{ id: string; name: string } | null>(null);
+  const [ytChannel, setYtChannel] = useState<{ id: string; title: string } | null>(null);
+  const [twitchChannel, setTwitchChannel] = useState<{ id: string; login: string; displayName: string } | null>(null);
 
   useEffect(() => {
     api.getFfmpegVersion()
@@ -41,12 +43,20 @@ export function Settings() {
       .catch(() => {});
   }, []);
 
-  // Load the currently-saved Facebook Page so the non-edit view shows what's selected.
+  // Load the connected account/channel for each platform to show in Settings.
   useEffect(() => {
     if (auth.facebook) {
       api.getFacebookSelectedPage().then(setSavedPage).catch(() => {});
     }
   }, [auth.facebook]);
+
+  useEffect(() => {
+    if (auth.youtube) api.getYouTubeChannel().then(setYtChannel).catch(() => {});
+  }, [auth.youtube]);
+
+  useEffect(() => {
+    if (auth.twitch) api.getTwitchChannel().then(setTwitchChannel).catch(() => {});
+  }, [auth.twitch]);
 
   // Auto-show page picker if redirected from Facebook OAuth
   useEffect(() => {
@@ -117,7 +127,11 @@ export function Settings() {
           connectUrl="/auth/youtube/start"
           onDisconnect={() => handleDisconnect('youtube')}
           disconnecting={disconnecting === 'youtube'}
-        />
+        >
+          {auth.youtube && ytChannel && (
+            <Text size="sm">Channel: <Text span fw={600}>{ytChannel.title}</Text></Text>
+          )}
+        </PlatformCard>
 
         <PlatformCard
           name="Facebook"
@@ -166,7 +180,11 @@ export function Settings() {
           connectUrl="/auth/twitch/start"
           onDisconnect={() => handleDisconnect('twitch')}
           disconnecting={disconnecting === 'twitch'}
-        />
+        >
+          {auth.twitch && twitchChannel && (
+            <Text size="sm">Channel: <Text span fw={600}>{twitchChannel.displayName}</Text></Text>
+          )}
+        </PlatformCard>
       </SimpleGrid>
 
       <Card withBorder>

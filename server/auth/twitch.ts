@@ -176,6 +176,24 @@ export function getTwitchCredentials(): { accessToken: string; broadcasterId: st
   };
 }
 
+/** The connected Twitch channel (for display in Settings). */
+export function getTwitchChannelInfo(): { id: string; login: string; displayName: string } | null {
+  const db = getDb();
+  const cred = db.prepare('SELECT extra_json FROM credentials WHERE platform = ?').get('twitch') as {
+    extra_json: string | null;
+  } | undefined;
+
+  if (!cred?.extra_json) return null;
+  const extra = JSON.parse(cred.extra_json);
+  if (!extra.broadcaster_id) return null;
+
+  return {
+    id: extra.broadcaster_id,
+    login: extra.login ?? '',
+    displayName: extra.display_name ?? extra.login ?? extra.broadcaster_id,
+  };
+}
+
 export function disconnectTwitch(): void {
   const db = getDb();
   db.prepare('DELETE FROM credentials WHERE platform = ?').run('twitch');

@@ -67,6 +67,8 @@ export const api = {
     request<{ youtube: boolean; facebook: boolean; twitch: boolean }>('/api/auth/status'),
   getFacebookPages: () => request<Array<{ id: string; name: string; access_token: string }>>('/api/auth/facebook/pages'),
   getFacebookSelectedPage: () => request<{ id: string; name: string } | null>('/api/auth/facebook/selected-page'),
+  getYouTubeChannel: () => request<{ id: string; title: string } | null>('/api/auth/youtube/channel'),
+  getTwitchChannel: () => request<{ id: string; login: string; displayName: string } | null>('/api/auth/twitch/channel'),
   selectFacebookPage: (pageId: string, pageName: string, accessToken: string) =>
     request<unknown>('/api/auth/facebook/page', {
       method: 'POST',
