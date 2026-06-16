@@ -1,7 +1,11 @@
 import { config } from '../config.js';
 import { getDb } from '../db/index.js';
 
-const PERMISSIONS = ['publish_video', 'pages_read_engagement', 'pages_manage_posts'];
+// publish_video: create/manage (incl. live) videos on the Page
+// pages_read_engagement: list the user's Pages and obtain the Page access token
+// (pages_manage_posts was requested before but Facebook rejects it as an invalid scope
+//  for this app, and it isn't needed for the live-video flow.)
+const PERMISSIONS = ['publish_video', 'pages_read_engagement'];
 
 export function getFacebookAuthUrl(): string {
   const params = new URLSearchParams({
