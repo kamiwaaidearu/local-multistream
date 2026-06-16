@@ -94,7 +94,7 @@ export function StreamPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
   // Source mode
-  const [mode, setMode] = useState<SourceMode>('obs');
+  const [mode, setMode] = useState<SourceMode>('studio');
   const [modeInitialized, setModeInitialized] = useState(false);
   const [sourceConnected, setSourceConnected] = useState(false);
   const [sourceType, setSourceType] = useState<'obs' | 'studio' | null>(null);
@@ -341,8 +341,8 @@ export function StreamPage() {
         onChange={handleModeChange}
         disabled={modeToggleDisabled}
         data={[
-          { value: 'obs', label: 'OBS' },
           { value: 'studio', label: 'Web Studio' },
+          { value: 'obs', label: 'OBS' },
         ]}
         fullWidth
       />

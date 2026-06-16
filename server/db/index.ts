@@ -12,34 +12,34 @@ const DB_PATH = join(__dirname, '..', '..', 'data', 'multistream.db');
 export const DEFAULT_GRID_TEMPLATE = {
   width: 1920,
   height: 1080,
-  backgroundColor: '#1a3a5c',
+  backgroundColor: '#094d8a',
   columns: [
     { unit: 'fr', value: 4 },
     { unit: 'fr', value: 1 },
   ],
   rows: [
     { unit: 'fr', value: 1 },
-    { unit: 'px', value: 200 },
+    { unit: 'px', value: 216 },
   ],
   gap: 0,
   cells: [
     {
       id: 'screen',
       row: 0, col: 0, rowSpan: 1, colSpan: 1,
-      content: { type: 'screenShare' },
+      content: { type: 'screenShare', objectFit: 'cover' },
+      backgroundColor: '#094d8a',
     },
     {
       id: 'camera',
       row: 1, col: 1, rowSpan: 1, colSpan: 1,
-      content: { type: 'webcam' },
-      backgroundColor: '#0d2137',
+      content: { type: 'webcam', objectFit: 'cover' },
+      backgroundColor: '#094d8a',
     },
     {
       id: 'footer',
       row: 1, col: 0, rowSpan: 1, colSpan: 1,
       content: { type: 'image', src: '/uploads/overlays/rm-logo.png', objectFit: 'contain' },
-      backgroundColor: '#0d2137',
-      padding: 10,
+      backgroundColor: '#094d8a',
     },
     {
       id: 'branding',
@@ -54,6 +54,7 @@ export const DEFAULT_GRID_TEMPLATE = {
         align: 'center',
         verticalAlign: 'top',
       },
+      backgroundColor: '#094d8a',
       padding: 15,
     },
   ],

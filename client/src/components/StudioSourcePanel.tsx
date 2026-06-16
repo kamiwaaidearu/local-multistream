@@ -39,7 +39,9 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [screenAudioStream, setScreenAudioStream] = useState<MediaStream | null>(null);
   const [webcamDevices, setWebcamDevices] = useState<MediaDeviceInfo[]>([]);
+  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [selectedMicId, setSelectedMicId] = useState<string | null>(null);
   const [webcamEnabled, setWebcamEnabled] = useState(false);
   const [screenEnabled, setScreenEnabled] = useState(false);
 
@@ -61,18 +63,23 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
       });
   }, []);
 
-  // Enumerate webcam devices
+  // Enumerate camera and microphone devices
   useEffect(() => {
     navigator.mediaDevices.enumerateDevices()
       .then((devices) => {
         const video = devices.filter((d) => d.kind === 'videoinput');
+        const audio = devices.filter((d) => d.kind === 'audioinput');
         setWebcamDevices(video);
+        setMicDevices(audio);
         if (video.length > 0 && !selectedDeviceId) {
           setSelectedDeviceId(video[0].deviceId);
         }
+        if (audio.length > 0 && !selectedMicId) {
+          setSelectedMicId(audio[0].deviceId);
+        }
       })
       .catch(() => {});
-  }, [selectedDeviceId]);
+  }, [selectedDeviceId, selectedMicId]);
 
   // Cleanup media tracks on unmount
   useEffect(() => {
@@ -119,14 +126,14 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
       resume(); // ensure the audio context is running (this click is a user gesture)
       const stream = await navigator.mediaDevices.getUserMedia({
         video: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true,
-        audio: true,
+        audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true,
       });
       setWebcamStream(stream);
       setWebcamEnabled(true);
     } catch (err) {
       notifications.show({ title: 'Camera Error', message: String(err), color: 'red' });
     }
-  }, [webcamEnabled, webcamStream, selectedDeviceId, resume]);
+  }, [webcamEnabled, webcamStream, selectedDeviceId, selectedMicId, resume]);
 
   // Start/stop screen share
   const toggleScreen = useCallback(async () => {
@@ -300,16 +307,30 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
             </Group>
 
             {!webcamEnabled && (
-              <Select
-                size="xs"
-                placeholder="Choose camera..."
-                data={webcamDevices.map((d) => ({
-                  value: d.deviceId,
-                  label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
-                }))}
-                value={selectedDeviceId}
-                onChange={setSelectedDeviceId}
-              />
+              <>
+                <Select
+                  size="xs"
+                  label="Camera"
+                  placeholder="Choose camera..."
+                  data={webcamDevices.map((d) => ({
+                    value: d.deviceId,
+                    label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
+                  }))}
+                  value={selectedDeviceId}
+                  onChange={setSelectedDeviceId}
+                />
+                <Select
+                  size="xs"
+                  label="Microphone"
+                  placeholder="Choose microphone..."
+                  data={micDevices.map((d) => ({
+                    value: d.deviceId,
+                    label: d.label || `Microphone ${d.deviceId.slice(0, 8)}`,
+                  }))}
+                  value={selectedMicId}
+                  onChange={setSelectedMicId}
+                />
+              </>
             )}
 
             {webcamEnabled && (
@@ -331,7 +352,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
                 variant={webcamEnabled ? 'outline' : 'filled'}
                 onClick={toggleWebcam}
               >
-                {webcamEnabled ? 'Turn off' : 'Turn on camera'}
+                {webcamEnabled ? 'Turn off' : 'Turn on camera and microphone'}
               </Button>
             </Group>
           </Stack>
