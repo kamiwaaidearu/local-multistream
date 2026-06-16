@@ -27,7 +27,7 @@ export function useCanvasCompositor({
   template,
   webcamStream,
   screenStream,
-  fps = 30,
+  fps = 60,
 }: UseCanvasCompositorOptions): UseCanvasCompositorResult {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [compositeStream, setCompositeStream] = useState<MediaStream | null>(null);

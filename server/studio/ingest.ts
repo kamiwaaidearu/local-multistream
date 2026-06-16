@@ -50,6 +50,7 @@ function stopIngestFfmpeg(): Promise<void> {
 function startIngestFfmpeg(): ChildProcess {
   const rtmpUrl = `rtmp://127.0.0.1:${config.rtmpPort}/live/${config.localStreamKey}`;
 
+  const vb = `${config.studioVideoBitrateKbps}k`;
   const args = [
     '-f', 'webm',
     '-analyzeduration', '1000000',
@@ -57,15 +58,17 @@ function startIngestFfmpeg(): ChildProcess {
     '-i', 'pipe:0',
     '-c:v', 'libx264',
     '-preset', 'veryfast',
-    '-tune', 'zerolatency',
-    '-b:v', '4500k',
-    '-maxrate', '4500k',
-    '-bufsize', '9000k',
+    '-profile:v', 'high',
     '-pix_fmt', 'yuv420p',
-    '-g', '60',
+    // Constant bitrate so the encoder actually spends the budget (sharp image) rather than
+    // undershooting on low-motion slides. Dropped -tune zerolatency — it disabled b-frames
+    // and lookahead, which hurt quality; a second or two of extra latency is fine for a
+    // one-way broadcast.
+    '-b:v', vb, '-minrate', vb, '-maxrate', vb, '-bufsize', `${config.studioVideoBitrateKbps * 2}k`,
+    '-g', '120',
     '-c:a', 'aac',
-    '-b:a', '128k',
-    '-ar', '44100',
+    '-b:a', `${config.studioAudioBitrateKbps}k`,
+    '-ar', '48000',
     '-f', 'flv',
     rtmpUrl,
   ];

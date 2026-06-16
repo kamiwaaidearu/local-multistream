@@ -130,7 +130,8 @@ export function useStudioStream({
 
       const recorder = new MediaRecorder(combinedStream, {
         mimeType,
-        videoBitsPerSecond: 4_500_000,
+        videoBitsPerSecond: 8_000_000,
+        audioBitsPerSecond: 160_000,
       });
       recorderRef.current = recorder;
 

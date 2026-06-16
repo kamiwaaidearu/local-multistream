@@ -23,6 +23,10 @@ export const config = Object.freeze({
   localStreamKey: env('LOCAL_STREAM_KEY', 'multistream-live'),
   fbApiVersion: env('FB_API_VERSION', 'v25.0'),
   appSecret: process.env.APP_SECRET ?? '',
+  // Web Studio re-encode quality (kbps). Tunable for your upload bandwidth — note the
+  // server fans this out to EACH platform, so total upload ≈ videoBitrate × (# platforms).
+  studioVideoBitrateKbps: envInt('STUDIO_VIDEO_BITRATE', 4500),
+  studioAudioBitrateKbps: envInt('STUDIO_AUDIO_BITRATE', 160),
 
   youtube: {
     clientId: process.env.YT_CLIENT_ID ?? '',
