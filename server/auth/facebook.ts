@@ -9,12 +9,13 @@ import { getDb } from '../db/index.js';
 //   otherwise Facebook rejects it as an "invalid scope" during OAuth.
 const PERMISSIONS = ['publish_video', 'pages_show_list', 'pages_read_engagement', 'pages_manage_posts'];
 
-export function getFacebookAuthUrl(): string {
+export function getFacebookAuthUrl(state: string): string {
   const params = new URLSearchParams({
     client_id: config.facebook.appId,
     redirect_uri: config.facebook.redirectUri,
     scope: PERMISSIONS.join(','),
     response_type: 'code',
+    state,
   });
   return `https://www.facebook.com/${config.fbApiVersion}/dialog/oauth?${params}`;
 }

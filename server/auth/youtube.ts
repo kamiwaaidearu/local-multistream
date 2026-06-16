@@ -16,12 +16,13 @@ function createOAuth2Client() {
   );
 }
 
-export function getYouTubeAuthUrl(): string {
+export function getYouTubeAuthUrl(state: string): string {
   const oauth2Client = createOAuth2Client();
   return oauth2Client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
     scope: SCOPES,
+    state,
   });
 }
 

@@ -98,6 +98,11 @@ export const api = {
     }),
   disconnectPlatform: (platform: string) =>
     request<unknown>(`/api/auth/disconnect/${platform}`, { method: 'POST' }),
+  // Authenticated OAuth initiation: returns the provider's consent URL to navigate to. Gating
+  // this (vs. a plain anchor) is what lets the public callback safely require a server-issued
+  // state nonce — see server/routes/auth.ts.
+  startOAuth: (platform: 'youtube' | 'facebook' | 'twitch') =>
+    request<{ url: string }>(`/auth/${platform}/start`),
 
   // Status
   getObsStatus: () => request<{ connected: boolean }>('/api/stream/obs-status'),

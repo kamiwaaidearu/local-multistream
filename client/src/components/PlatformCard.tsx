@@ -3,13 +3,14 @@ import { Card, Text, Badge, Group, Stack, Button } from '@mantine/core';
 interface PlatformCardProps {
   name: string;
   connected: boolean;
-  connectUrl: string;
+  onConnect: () => void;
+  connecting?: boolean;
   onDisconnect: () => void;
   disconnecting?: boolean;
   children?: React.ReactNode;
 }
 
-export function PlatformCard({ name, connected, connectUrl, onDisconnect, disconnecting, children }: PlatformCardProps) {
+export function PlatformCard({ name, connected, onConnect, connecting, onDisconnect, disconnecting, children }: PlatformCardProps) {
   return (
     <Card shadow="sm" padding="lg" radius="md" withBorder>
       <Stack>
@@ -21,7 +22,7 @@ export function PlatformCard({ name, connected, connectUrl, onDisconnect, discon
         </Group>
 
         {!connected ? (
-          <Button component="a" href={connectUrl} fullWidth>
+          <Button onClick={onConnect} loading={connecting} fullWidth>
             Connect {name}
           </Button>
         ) : (

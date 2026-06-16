@@ -78,4 +78,13 @@ export function validateConfig(): void {
       'control your streams. Set APP_SECRET before exposing it beyond localhost.',
     );
   }
+
+  if (config.localStreamKey === 'multistream-live') {
+    console.warn(
+      '[config] LOCAL_STREAM_KEY is the public default. The RTMP ingest is gated only by this ' +
+      'key (APP_SECRET does not protect it), so anyone who can reach the RTMP port and knows ' +
+      'the default can publish to your stream. Set a unique LOCAL_STREAM_KEY before exposing ' +
+      'the RTMP port beyond localhost.',
+    );
+  }
 }

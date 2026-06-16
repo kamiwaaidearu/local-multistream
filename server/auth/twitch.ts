@@ -3,12 +3,13 @@ import { getDb } from '../db/index.js';
 
 const SCOPES = ['channel:manage:broadcast', 'channel:read:stream_key'];
 
-export function getTwitchAuthUrl(): string {
+export function getTwitchAuthUrl(state: string): string {
   const params = new URLSearchParams({
     client_id: config.twitch.clientId,
     redirect_uri: config.twitch.redirectUri,
     response_type: 'code',
     scope: SCOPES.join(' '),
+    state,
   });
   return `https://id.twitch.tv/oauth2/authorize?${params}`;
 }

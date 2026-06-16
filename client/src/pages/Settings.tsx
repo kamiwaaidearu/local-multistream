@@ -27,6 +27,7 @@ export function Settings() {
   const { auth, refresh: refreshAuth } = useAuth();
   const [searchParams] = useSearchParams();
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState<string | null>(null);
   const [ffmpegVersion, setFfmpegVersion] = useState<string | null>(null);
 
   // Facebook page picker state
@@ -104,6 +105,17 @@ export function Settings() {
     }
   }
 
+  async function handleConnect(platform: 'youtube' | 'facebook' | 'twitch') {
+    setConnecting(platform);
+    try {
+      const { url } = await api.startOAuth(platform);
+      window.location.href = url; // hand off to the provider's consent screen
+    } catch (err) {
+      notifications.show({ title: 'Error', message: String(err), color: 'red' });
+      setConnecting(null);
+    }
+  }
+
   async function handleDisconnect(platform: string) {
     setDisconnecting(platform);
     try {
@@ -125,7 +137,8 @@ export function Settings() {
         <PlatformCard
           name="YouTube"
           connected={auth.youtube}
-          connectUrl="/auth/youtube/start"
+          onConnect={() => handleConnect('youtube')}
+          connecting={connecting === 'youtube'}
           onDisconnect={() => handleDisconnect('youtube')}
           disconnecting={disconnecting === 'youtube'}
         >
@@ -137,7 +150,8 @@ export function Settings() {
         <PlatformCard
           name="Facebook"
           connected={auth.facebook}
-          connectUrl="/auth/facebook/start"
+          onConnect={() => handleConnect('facebook')}
+          connecting={connecting === 'facebook'}
           onDisconnect={() => handleDisconnect('facebook')}
           disconnecting={disconnecting === 'facebook'}
         >
@@ -178,7 +192,8 @@ export function Settings() {
         <PlatformCard
           name="Twitch"
           connected={auth.twitch}
-          connectUrl="/auth/twitch/start"
+          onConnect={() => handleConnect('twitch')}
+          connecting={connecting === 'twitch'}
           onDisconnect={() => handleDisconnect('twitch')}
           disconnecting={disconnecting === 'twitch'}
         >

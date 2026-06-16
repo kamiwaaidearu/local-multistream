@@ -23,13 +23,17 @@ export function startRtmpServer(): void {
 
   nms = new NodeMediaServer(nmsConfig);
 
-  nms.on('prePublish', (_id: string, streamPath: string) => {
+  nms.on('prePublish', (id: string, streamPath: string) => {
     const expectedPath = `/live/${config.localStreamKey}`;
     if (streamPath === expectedPath) {
       obsConnected = true;
       console.log(`[rtmp] OBS connected: ${streamPath}`);
     } else {
-      console.warn(`[rtmp] Rejected stream with unexpected key: ${streamPath}`);
+      // Actually drop the session. node-media-server only aborts a publish if a prePublish
+      // listener calls session.reject(); the old code merely logged, so a wrong (or absent)
+      // key was silently accepted and would still be fanned out to the platforms.
+      console.warn(`[rtmp] Rejecting stream with unexpected key: ${streamPath}`);
+      nms?.getSession(id)?.reject();
     }
   });
 
