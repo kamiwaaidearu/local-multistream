@@ -55,8 +55,6 @@ export function useCanvasCompositor({
   const webcamVideoRef = useRef<HTMLVideoElement | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
   const preloadedImages = useRef<Map<string, HTMLImageElement>>(new Map());
-  const animFrameRef = useRef<number>(0);
-  const lastFrameTime = useRef<number>(0);
 
   // Preload overlay images from grid cells
   const preloadImages = useCallback((cells: GridCell[]) => {
@@ -109,9 +107,14 @@ export function useCanvasCompositor({
     preloadImages(template.cells ?? []);
     setIsRendering(true);
 
-    // Capture stream from canvas
-    const stream = canvas.captureStream(fps);
+    // Capture the canvas with MANUAL frame capture (captureStream(0)): frames are emitted
+    // only when we call track.requestFrame(). We drive that from a Web Worker timer (below)
+    // instead of requestAnimationFrame, because rAF — and the browser's automatic canvas
+    // capture — get throttled to ~1fps when the studio tab is backgrounded (which it always
+    // is while the operator is on their slides tab). A worker's timer is not throttled.
+    const stream = canvas.captureStream(0);
     setCompositeStream(stream);
+    const videoTrack = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack | undefined;
 
     const frameInterval = 1000 / fps;
 
@@ -157,14 +160,7 @@ export function useCanvasCompositor({
       }
     }
 
-    function render(timestamp: number) {
-      // Throttle to target FPS
-      if (timestamp - lastFrameTime.current < frameInterval) {
-        animFrameRef.current = requestAnimationFrame(render);
-        return;
-      }
-      lastFrameTime.current = timestamp;
-
+    function renderFrame() {
       if (!ctx) return;
 
       // Read latest template and grid sizes from refs
@@ -263,13 +259,28 @@ export function useCanvasCompositor({
         }
       }
 
-      animFrameRef.current = requestAnimationFrame(render);
     }
 
-    animFrameRef.current = requestAnimationFrame(render);
+    // Drive the render at a steady fps from a Web Worker timer. A worker's setInterval is NOT
+    // throttled when the page is backgrounded, so the composite keeps running at full rate
+    // while the operator is on another tab (their slides). Each tick: redraw, then capture.
+    const ticker = new Worker(
+      URL.createObjectURL(
+        new Blob(
+          ['let t=null;onmessage=(e)=>{if(e.data&&e.data.stop){if(t)clearInterval(t);t=null;return;}if(t)clearInterval(t);t=setInterval(()=>postMessage(0),e.data.interval);};'],
+          { type: 'application/javascript' },
+        ),
+      ),
+    );
+    ticker.onmessage = () => {
+      renderFrame();
+      try { videoTrack?.requestFrame(); } catch { /* ignore */ }
+    };
+    ticker.postMessage({ interval: frameInterval });
 
     return () => {
-      cancelAnimationFrame(animFrameRef.current);
+      try { ticker.postMessage({ stop: true }); } catch { /* ignore */ }
+      ticker.terminate();
       setIsRendering(false);
       // Stop all tracks on the captured stream
       stream.getTracks().forEach((t) => t.stop());
