@@ -111,19 +111,20 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
       return;
     }
 
-    if (code === 0) {
-      // Clean exit (from 'q' command during end stream)
-      console.log(`[ffmpeg] ${ps.platform} exited cleanly`);
+    // If the stream is no longer live, this is normal teardown — don't restart.
+    const db = getDb();
+    const stream = db.prepare('SELECT status FROM streams WHERE id = ?').get(streamId) as { status: string } | undefined;
+    if (stream?.status !== 'live') {
+      console.log(`[ffmpeg] ${ps.platform} exited (code ${code}); stream not live — not restarting`);
       return;
     }
 
-    // Check if stream is still supposed to be live
-    const db = getDb();
-    const stream = db.prepare('SELECT status FROM streams WHERE id = ?').get(streamId) as { status: string } | undefined;
-    if (stream?.status !== 'live') return; // Stream was ended, don't restart
-
-    console.error(`[ffmpeg] ${ps.platform} crashed with exit code ${code}`);
-    logEvent(streamId, ps.platform, 'ffmpeg_crash', `Exit code: ${code}`);
+    // Stream is still live but FFmpeg exited. Either it crashed, OR — commonly — the local
+    // RTMP input ended because the source (Studio/OBS) dropped. FFmpeg exits 0 on a clean
+    // input EOF, so code 0 is NOT "all done" here. Reconnect: the source may be coming back
+    // (the studio auto-reconnects), and we resume the fan-out once local RTMP republishes.
+    console.warn(`[ffmpeg] ${ps.platform} exited (code ${code}) while stream is live — reconnecting`);
+    logEvent(streamId, ps.platform, 'ffmpeg_disconnected', `Exit code: ${code}`);
 
     // Circuit breaker: exponential backoff, max 3 retries
     const MAX_RETRIES = 3;
