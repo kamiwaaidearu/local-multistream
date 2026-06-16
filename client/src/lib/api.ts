@@ -15,7 +15,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const authCheck = await fetch('/api/auth/check').then((r) => r.json()).catch(() => ({ required: false }));
     if (authCheck.required) {
       sessionStorage.removeItem('auth_token');
-      window.location.href = '/login';
+      // Don't redirect if we're already on the login page — a 401 from a background call
+      // (e.g. the header's auth-status fetch) would otherwise reload /login endlessly.
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
     }
     throw new Error('Authentication required');
   }
