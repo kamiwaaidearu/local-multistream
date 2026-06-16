@@ -66,6 +66,7 @@ export const api = {
   getAuthStatus: () =>
     request<{ youtube: boolean; facebook: boolean; twitch: boolean }>('/api/auth/status'),
   getFacebookPages: () => request<Array<{ id: string; name: string; access_token: string }>>('/api/auth/facebook/pages'),
+  getFacebookSelectedPage: () => request<{ id: string; name: string } | null>('/api/auth/facebook/selected-page'),
   selectFacebookPage: (pageId: string, pageName: string, accessToken: string) =>
     request<unknown>('/api/auth/facebook/page', {
       method: 'POST',

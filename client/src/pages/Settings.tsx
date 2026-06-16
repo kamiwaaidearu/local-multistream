@@ -33,12 +33,20 @@ export function Settings() {
   const [showPagePicker, setShowPagePicker] = useState(false);
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [savingPage, setSavingPage] = useState(false);
+  const [savedPage, setSavedPage] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     api.getFfmpegVersion()
       .then((info) => setFfmpegVersion(info.version))
       .catch(() => {});
   }, []);
+
+  // Load the currently-saved Facebook Page so the non-edit view shows what's selected.
+  useEffect(() => {
+    if (auth.facebook) {
+      api.getFacebookSelectedPage().then(setSavedPage).catch(() => {});
+    }
+  }, [auth.facebook]);
 
   // Auto-show page picker if redirected from Facebook OAuth
   useEffect(() => {
@@ -76,6 +84,7 @@ export function Settings() {
       await api.selectFacebookPage(page.id, page.name, page.access_token);
       notifications.show({ title: 'Success', message: `Selected page: ${page.name}`, color: 'green' });
       setShowPagePicker(false);
+      setSavedPage({ id: page.id, name: page.name });
       refreshAuth();
     } catch (err) {
       notifications.show({ title: 'Error', message: String(err), color: 'red' });
@@ -139,9 +148,15 @@ export function Settings() {
             </Card>
           )}
           {auth.facebook && !showPagePicker && (
-            <Button size="xs" variant="light" onClick={loadFacebookPages}>
-              Change Page
-            </Button>
+            <Stack gap={6}>
+              <Text size="sm">
+                Streaming to:{' '}
+                <Text span fw={600}>{savedPage ? savedPage.name : 'No page selected yet'}</Text>
+              </Text>
+              <Button size="xs" variant="light" onClick={loadFacebookPages}>
+                {savedPage ? 'Change Page' : 'Select Page'}
+              </Button>
+            </Stack>
           )}
         </PlatformCard>
 

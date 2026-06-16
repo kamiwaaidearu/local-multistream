@@ -125,6 +125,20 @@ export function getFacebookPageToken(): { accessToken: string; pageId: string } 
   return { accessToken: cred.access_token, pageId: extra.page_id };
 }
 
+/** The currently-selected Page (id + name), or null if none is saved yet. */
+export function getSelectedFacebookPage(): { id: string; name: string } | null {
+  const db = getDb();
+  const cred = db.prepare('SELECT extra_json FROM credentials WHERE platform = ?').get('facebook') as {
+    extra_json: string | null;
+  } | undefined;
+
+  if (!cred?.extra_json) return null;
+  const extra = JSON.parse(cred.extra_json);
+  if (!extra.page_id || extra.needs_page_selection) return null;
+
+  return { id: extra.page_id, name: extra.page_name ?? extra.page_id };
+}
+
 export function disconnectFacebook(): void {
   const db = getDb();
   db.prepare('DELETE FROM credentials WHERE platform = ?').run('facebook');

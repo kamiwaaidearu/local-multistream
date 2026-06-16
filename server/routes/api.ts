@@ -314,6 +314,11 @@ apiRouter.get('/auth/facebook/pages', async (_req: Request, res: Response) => {
   }
 });
 
+apiRouter.get('/auth/facebook/selected-page', async (_req: Request, res: Response) => {
+  const { getSelectedFacebookPage } = await import('../auth/facebook.js');
+  res.json(getSelectedFacebookPage());
+});
+
 apiRouter.post('/auth/facebook/page', async (req: Request, res: Response) => {
   try {
     const { page_id, page_name, access_token } = req.body;
