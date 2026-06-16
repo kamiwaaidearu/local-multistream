@@ -1,10 +1,8 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { Center, Card, Stack, Title, TextInput, Button, Text } from '@mantine/core';
 import { api } from '../lib/api';
 
 export function Login() {
-  const navigate = useNavigate();
   const [secret, setSecret] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -17,7 +15,8 @@ export function Login() {
     try {
       const { token } = await api.login(secret);
       sessionStorage.setItem('auth_token', token);
-      navigate('/');
+      // Full navigation (not client-side) so AuthGate + header re-evaluate with the new token.
+      window.location.href = '/';
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
     } finally {
