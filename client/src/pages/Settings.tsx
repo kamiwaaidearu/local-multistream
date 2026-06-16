@@ -14,6 +14,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import { useAuth } from '../hooks/useAuth';
 import { PlatformCard } from '../components/PlatformCard';
+import { ReminderSettingsCard } from '../components/ReminderSettingsCard';
 import { api } from '../lib/api';
 
 interface FacebookPage {
@@ -186,6 +187,8 @@ export function Settings() {
           )}
         </PlatformCard>
       </SimpleGrid>
+
+      {auth.facebook && <ReminderSettingsCard />}
 
       <Card withBorder>
         <Group justify="space-between">

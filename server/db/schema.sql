@@ -7,16 +7,23 @@ CREATE TABLE IF NOT EXISTS credentials (
 );
 
 CREATE TABLE IF NOT EXISTS streams (
-  id                TEXT PRIMARY KEY,
-  series_id         TEXT,
-  name              TEXT NOT NULL,
-  description       TEXT,
-  thumbnail_path    TEXT,
-  scheduled_start   INTEGER,
-  status            TEXT NOT NULL DEFAULT 'draft',
-  started_at        INTEGER,
-  ended_at          INTEGER,
-  created_at        INTEGER NOT NULL
+  id                    TEXT PRIMARY KEY,
+  series_id             TEXT,
+  name                  TEXT NOT NULL,
+  description           TEXT,
+  thumbnail_path        TEXT,
+  scheduled_start       INTEGER,
+  status                TEXT NOT NULL DEFAULT 'draft',
+  fb_reminders_enabled  INTEGER NOT NULL DEFAULT 1,
+  started_at            INTEGER,
+  ended_at              INTEGER,
+  created_at            INTEGER NOT NULL
+);
+
+-- Generic app settings (key/value JSON). Holds e.g. the Facebook reminder schedule.
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS platform_streams (

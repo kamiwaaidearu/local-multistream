@@ -20,28 +20,28 @@ async function errorMessage(res: Response): Promise<string> {
 }
 
 /**
- * Create a scheduled live video on a Facebook Page.
+ * Create an UNPUBLISHED live video on a Facebook Page, ready to receive RTMP immediately.
+ * It stays invisible until transitioned to LIVE_NOW (see publishFacebookLiveVideo), which we
+ * do at go-live once data is flowing.
+ *
+ * NOTE: the API can no longer SCHEDULE live videos — both the old `planned_start_time` and the
+ * `SCHEDULED_*` statuses now error ("Scheduled Live has been deprecated"), verified against the
+ * live API. So the live video is always created immediately, at go-live. Advance visibility is
+ * handled separately by a scheduled announcement post (see createScheduledPagePost).
  */
 export async function createFacebookLiveVideo(
   title: string,
   description: string | null,
-  scheduledStart: number | null,
 ): Promise<{ liveVideoId: string; streamUrl: string }> {
   const { accessToken, pageId } = getPageAuth();
 
   const body: Record<string, unknown> = {
     title,
+    status: 'UNPUBLISHED',
     access_token: accessToken,
   };
 
   if (description) body.description = description;
-
-  if (scheduledStart) {
-    body.planned_start_time = scheduledStart;
-    body.status = 'SCHEDULED_UNPUBLISHED';
-  } else {
-    body.status = 'UNPUBLISHED';
-  }
 
   const res = await fetch(`${API}/${pageId}/live_videos`, {
     method: 'POST',
@@ -62,9 +62,9 @@ export async function createFacebookLiveVideo(
 }
 
 /**
- * Take a Facebook live video live. Per the Live Video API, an UNPUBLISHED /
- * SCHEDULED_UNPUBLISHED video is "not visible to other users" until it's transitioned to
- * LIVE_NOW via POST /{live-video-id}. The transition only succeeds once the stream URL is
+ * Take a Facebook live video live. Per the Live Video API, an UNPUBLISHED video is "not visible
+ * to other users" until it's transitioned to LIVE_NOW via POST /{live-video-id}. The transition
+ * only succeeds once the stream URL is
  * already receiving data — so this must be called *after* the fan-out has started pushing.
  * Ref: https://developers.facebook.com/docs/live-video-api (status=LIVE_NOW).
  */
@@ -139,5 +139,60 @@ export async function deleteFacebookLiveVideo(liveVideoId: string): Promise<void
 
   if (!res.ok) {
     console.warn(`[facebook] Delete live video failed: ${await errorMessage(res)}`);
+  }
+}
+
+/**
+ * Schedule a plain announcement post on the Page. Since the API can't schedule live videos or
+ * create events, this is how an upcoming stream gets advance visibility — a normal feed post,
+ * published automatically at `scheduledTime` (unix seconds, ~10 min to 6 months ahead). It is
+ * NOT publicly visible until then. Returns the new post id.
+ */
+export async function createScheduledPagePost(
+  message: string,
+  scheduledTime: number,
+): Promise<string> {
+  const { accessToken, pageId } = getPageAuth();
+
+  const params = new URLSearchParams({
+    message,
+    published: 'false',
+    scheduled_publish_time: String(scheduledTime),
+    access_token: accessToken,
+  });
+
+  const res = await fetch(`${API}/${pageId}/feed`, { method: 'POST', body: params });
+  if (!res.ok) {
+    throw new Error(`Facebook scheduled post failed: ${await errorMessage(res)}`);
+  }
+
+  const data = await res.json() as { id: string };
+  return data.id;
+}
+
+/** Publish a post to the Page immediately (e.g. a "we're live now" announcement). Returns the post id. */
+export async function createPagePost(message: string): Promise<string> {
+  const { accessToken, pageId } = getPageAuth();
+
+  const params = new URLSearchParams({ message, access_token: accessToken });
+  const res = await fetch(`${API}/${pageId}/feed`, { method: 'POST', body: params });
+  if (!res.ok) {
+    throw new Error(`Facebook post failed: ${await errorMessage(res)}`);
+  }
+
+  const data = await res.json() as { id: string };
+  return data.id;
+}
+
+/** Delete a Page post (e.g. a scheduled announcement no longer needed). Best-effort. */
+export async function deletePagePost(postId: string): Promise<void> {
+  const { accessToken } = getPageAuth();
+
+  const res = await fetch(`${API}/${postId}?access_token=${encodeURIComponent(accessToken)}`, {
+    method: 'DELETE',
+  });
+
+  if (!res.ok) {
+    console.warn(`[facebook] Delete post failed: ${await errorMessage(res)}`);
   }
 }

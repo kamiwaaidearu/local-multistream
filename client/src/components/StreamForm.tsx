@@ -7,6 +7,7 @@ import {
   Group,
   FileInput,
   Image,
+  Switch,
 } from '@mantine/core';
 import { DateTimePicker } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
@@ -16,6 +17,7 @@ interface StreamFormData {
   description: string | null;
   thumbnail_path: string | null;
   scheduled_start: number | null;
+  fb_reminders_enabled?: number;
 }
 
 interface StreamFormProps {
@@ -30,6 +32,7 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
   const [description, setDescription] = useState('');
   const [thumbnail, setThumbnail] = useState<File | null>(null);
   const [scheduledStart, setScheduledStart] = useState<Date | null>(null);
+  const [fbReminders, setFbReminders] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -38,6 +41,9 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
       setDescription(initialData.description || '');
       if (initialData.scheduled_start) {
         setScheduledStart(new Date(initialData.scheduled_start * 1000));
+      }
+      if (initialData.fb_reminders_enabled !== undefined) {
+        setFbReminders(initialData.fb_reminders_enabled !== 0);
       }
     }
   }, [initialData]);
@@ -58,6 +64,7 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
       formData.append('description', description);
       if (thumbnail) formData.append('thumbnail', thumbnail);
       if (scheduledStart) formData.append('scheduled_start', String(Math.floor(scheduledStart.getTime() / 1000)));
+      formData.append('fb_reminders_enabled', fbReminders ? '1' : '0');
       await onSave(formData);
     } catch (err) {
       notifications.show({ title: 'Error', message: String(err), color: 'red' });
@@ -103,6 +110,13 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
           value={scheduledStart}
           onChange={setScheduledStart}
           clearable
+        />
+
+        <Switch
+          label="Post to Facebook for this stream"
+          description="Advance reminder posts (only when a start time is set above — they're timed off it, per the schedule in Settings), plus a “we're live now” post when you go live."
+          checked={fbReminders}
+          onChange={(e) => setFbReminders(e.currentTarget.checked)}
         />
 
         <Group>

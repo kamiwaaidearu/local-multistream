@@ -91,6 +91,24 @@ export function getDb(): DatabaseSync {
       }
     }
 
+    // Facebook no longer supports API scheduling, so the old 'pending' state (events parked
+    // more than 7 days out for later auto-creation) is obsolete. Promote any leftover rows to
+    // 'created' so they're treated as deferred and the live video is created at go-live.
+    const migrated = db.prepare(
+      "UPDATE platform_streams SET status = 'created', error_message = NULL WHERE platform = 'facebook' AND status = 'pending'",
+    ).run();
+    if (migrated.changes > 0) {
+      console.log(`[db] Migrated ${migrated.changes} pending Facebook event(s) to deferred go-live creation`);
+    }
+
+    // Add streams.fb_reminders_enabled to pre-existing databases (CREATE TABLE IF NOT EXISTS
+    // won't alter an existing table). Defaults to on.
+    const streamCols = db.prepare('PRAGMA table_info(streams)').all() as Array<{ name: string }>;
+    if (!streamCols.some((c) => c.name === 'fb_reminders_enabled')) {
+      db.exec('ALTER TABLE streams ADD COLUMN fb_reminders_enabled INTEGER NOT NULL DEFAULT 1');
+      console.log('[db] Added streams.fb_reminders_enabled column');
+    }
+
     console.log(`[db] SQLite database opened at ${DB_PATH}`);
   }
   return db;
@@ -101,4 +119,22 @@ export function closeDb(): void {
     db.close();
     console.log('[db] Database connection closed');
   }
+}
+
+/** Read a JSON settings value by key, or undefined if unset. */
+export function getSetting<T>(key: string): T | undefined {
+  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+  if (!row) return undefined;
+  try {
+    return JSON.parse(row.value) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Write a JSON settings value by key. */
+export function setSetting(key: string, value: unknown): void {
+  getDb()
+    .prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+    .run(key, JSON.stringify(value));
 }

@@ -14,6 +14,7 @@ export interface Stream {
   thumbnail_path: string | null;
   scheduled_start: number | null;
   status: 'draft' | 'ready' | 'live' | 'ended' | 'error';
+  fb_reminders_enabled: number; // 0/1 — schedule Facebook announcement posts for this stream
   started_at: number | null;
   ended_at: number | null;
   created_at: number;

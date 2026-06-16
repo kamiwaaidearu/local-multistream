@@ -4,8 +4,9 @@ import { getYouTubeAuth } from '../auth/youtube.js';
 import { getFacebookPageToken } from '../auth/facebook.js';
 import { getTwitchCredentials } from '../auth/twitch.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
-import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo } from '../platforms/facebook.js';
+import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
+import { getReminderSettings, computeReminderTime, renderReminder } from './reminders.js';
 import type { Stream, PlatformStream, Platform } from '../types.js';
 
 function logEvent(streamId: string | null, platform: string | null, event: string, detail?: string) {
@@ -13,6 +14,110 @@ function logEvent(streamId: string | null, platform: string | null, event: strin
   db.prepare('INSERT INTO event_log (stream_id, platform, event, detail, ts) VALUES (?, ?, ?, ?, ?)').run(
     streamId, platform, event, detail ?? null, Date.now(),
   );
+}
+
+/** A scheduled announcement: the Facebook post id plus its publish time (unix seconds). */
+interface ScheduledPost { id: string; time: number; }
+
+/** Scheduled Facebook announcements stashed in a platform_stream's extra_json. */
+function facebookAnnouncementPosts(extraJson: string | null | undefined): ScheduledPost[] {
+  if (!extraJson) return [];
+  try {
+    const posts = (JSON.parse(extraJson) as { announcement_posts?: ScheduledPost[] }).announcement_posts;
+    return Array.isArray(posts) ? posts : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Schedule Facebook announcement posts for an upcoming stream per the reminder schedule.
+ * Honors the global enable, the per-stream toggle, and Facebook's posting window. Best-effort:
+ * individual failures are logged but never block setup. Returns the created posts (id + time).
+ */
+async function scheduleFacebookReminders(stream: Stream): Promise<ScheduledPost[]> {
+  if (!stream.scheduled_start || !stream.fb_reminders_enabled) return [];
+
+  const settings = getReminderSettings();
+  if (!settings.enabled) return [];
+
+  // {page} links to the Facebook Page (where the live video surfaces once live) — the live
+  // video itself doesn't exist until go-live, so an advance post can't link to it directly.
+  const pageId = getFacebookPageToken()?.pageId;
+  const pageUrl = pageId ? `https://www.facebook.com/${pageId}` : settings.site;
+
+  const now = Math.floor(Date.now() / 1000);
+  const minLead = 10 * 60;             // Facebook requires ≥ ~10 min ahead
+  const maxLead = 180 * 24 * 60 * 60;  // ...and ≤ ~6 months
+
+  const posts: ScheduledPost[] = [];
+  for (const rule of settings.rules) {
+    if (!rule.enabled) continue;
+    const when = computeReminderTime(rule, stream.scheduled_start, settings.timezone);
+    if (when == null) continue;
+    if (when < now + minLead || when > now + maxLead) {
+      logEvent(stream.id, 'facebook', 'announcement_skipped', `${rule.label}: outside Facebook's posting window`);
+      continue;
+    }
+    try {
+      const postId = await createScheduledPagePost(renderReminder(rule.template, stream, settings, pageUrl), when);
+      posts.push({ id: postId, time: when });
+      logEvent(stream.id, 'facebook', 'announcement_scheduled', `${rule.label} → post ${postId}`);
+    } catch (err) {
+      logEvent(stream.id, 'facebook', 'announcement_error', `${rule.label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return posts;
+}
+
+/**
+ * Re-sync a stream's Facebook announcement posts after an edit (time/title/description/toggle).
+ * Deletes the still-pending posts and recreates them from the current details; posts that have
+ * already published are left alone (can't un-send what people have seen). No-op until setup.
+ */
+export async function resyncFacebookReminders(streamId: string): Promise<void> {
+  const db = getDb();
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId) as Stream | undefined;
+  if (!stream) return;
+  const fbPs = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND platform = 'facebook'").get(streamId) as PlatformStream | undefined;
+  if (!fbPs || fbPs.status !== 'created') return; // not set up yet — nothing scheduled to sync
+
+  const now = Math.floor(Date.now() / 1000);
+  const existing = facebookAnnouncementPosts(fbPs.extra_json);
+  const published = existing.filter((p) => p.time <= now);
+  const pending = existing.filter((p) => p.time > now);
+
+  for (const p of pending) {
+    try { await deletePagePost(p.id); } catch { /* best-effort */ }
+  }
+
+  const fresh = await scheduleFacebookReminders(stream);
+  const all = [...published, ...fresh];
+  db.prepare('UPDATE platform_streams SET extra_json = ? WHERE id = ?')
+    .run(all.length ? JSON.stringify({ announcement_posts: all }) : null, fbPs.id);
+  logEvent(streamId, 'facebook', 'announcements_resynced', `${pending.length} replaced, ${fresh.length} pending`);
+}
+
+/**
+ * Publish the "we're live now" post once the broadcast is actually LIVE — this is the one post
+ * that can link to the real video ({video}), since the video only exists at go-live. Honors the
+ * global enable, the go-live sub-toggle, and the per-stream toggle. Best-effort.
+ */
+async function postGoLiveAnnouncement(stream: Stream, broadcastId: string): Promise<void> {
+  if (!stream.fb_reminders_enabled) return;
+  const settings = getReminderSettings();
+  if (!settings.enabled || !settings.goLivePost?.enabled) return;
+
+  const pageId = getFacebookPageToken()?.pageId;
+  const pageUrl = pageId ? `https://www.facebook.com/${pageId}` : settings.site;
+  const videoUrl = `https://www.facebook.com/watch/live/?v=${broadcastId}`;
+
+  try {
+    const postId = await createPagePost(renderReminder(settings.goLivePost.template, stream, settings, pageUrl, videoUrl));
+    logEvent(stream.id, 'facebook', 'golive_post', `Post ${postId}`);
+  } catch (err) {
+    logEvent(stream.id, 'facebook', 'golive_post_error', err instanceof Error ? err.message : String(err));
+  }
 }
 
 function getEnabledPlatforms(): Platform[] {
@@ -67,34 +172,24 @@ export async function setupStream(streamId: string): Promise<{ results: Record<s
         logEvent(streamId, 'youtube', 'setup_success', `Broadcast ${yt.broadcastId} created`);
 
       } else if (platform === 'facebook') {
-        // Facebook: only create if within 7 days or no scheduled time
-        const now = Math.floor(Date.now() / 1000);
-        const sevenDays = 7 * 24 * 60 * 60;
-        if (stream.scheduled_start && stream.scheduled_start - now > sevenDays) {
-          // Too far out, mark as pending
-          const psId = existing?.id ?? nanoid();
-          db.prepare(`
-            INSERT OR REPLACE INTO platform_streams (id, stream_id, platform, status, error_message)
-            VALUES (?, ?, 'facebook', 'pending', 'Scheduled more than 7 days out — will auto-create closer to date')
-          `).run(psId, streamId);
-          results[platform] = { success: true };
-          anySuccess = true;
-          continue;
-        }
-
-        const fb = await createFacebookLiveVideo(
-          stream.name,
-          stream.description,
-          stream.scheduled_start,
-        );
-
+        // Facebook's API can neither create Events nor schedule live videos (both
+        // deprecated/partner-gated — verified against the live API). So for advance visibility we
+        // schedule announcement POSTS per the reminder schedule, and the live video itself is
+        // created at go-live (see goLive). This row represents that live video — created deferred
+        // here (status 'created', no broadcast_id) with the announcement post ids in extra_json
+        // so they can be cleaned up on retry/delete.
         const psId = existing?.id ?? nanoid();
-        db.prepare(`
-          INSERT OR REPLACE INTO platform_streams (id, stream_id, platform, broadcast_id, rtmp_url, status, error_message)
-          VALUES (?, ?, 'facebook', ?, ?, 'created', NULL)
-        `).run(psId, streamId, fb.liveVideoId, fb.streamUrl);
+        const posts = await scheduleFacebookReminders(stream);
 
-        logEvent(streamId, 'facebook', 'setup_success', `Live video ${fb.liveVideoId} created`);
+        db.prepare(`
+          INSERT OR REPLACE INTO platform_streams (id, stream_id, platform, status, error_message, extra_json)
+          VALUES (?, ?, 'facebook', 'created', NULL, ?)
+        `).run(psId, streamId, posts.length ? JSON.stringify({ announcement_posts: posts }) : null);
+
+        logEvent(streamId, 'facebook', 'setup_success',
+          posts.length
+            ? `${posts.length} announcement post(s) scheduled — live video will be created at go-live`
+            : 'Ready — live video will be created at go-live');
 
       } else if (platform === 'twitch') {
         const key = await getTwitchStreamKey();
@@ -137,7 +232,16 @@ export async function setupStream(streamId: string): Promise<{ results: Record<s
 export async function setupSinglePlatform(streamId: string, platform: Platform): Promise<void> {
   const db = getDb();
 
-  // Delete the existing failed platform_stream
+  // If retrying Facebook, delete any previously-scheduled announcement posts first so we don't
+  // orphan them or end up with duplicates when setup re-creates them.
+  if (platform === 'facebook') {
+    const existing = db.prepare("SELECT extra_json FROM platform_streams WHERE stream_id = ? AND platform = 'facebook'").get(streamId) as { extra_json: string | null } | undefined;
+    for (const post of facebookAnnouncementPosts(existing?.extra_json)) {
+      try { await deletePagePost(post.id); } catch { /* best-effort */ }
+    }
+  }
+
+  // Delete the existing platform_stream
   db.prepare('DELETE FROM platform_streams WHERE stream_id = ? AND platform = ?').run(streamId, platform);
 
   // Re-run setup (setupStream handles individual platforms)
@@ -180,6 +284,29 @@ export async function goLive(streamId: string): Promise<void> {
     }
   }
 
+  // Facebook: create the live video now if it was deferred (a scheduled stream). FB no longer
+  // supports API scheduling and its RTMP URL is short-lived, so the live video can only be
+  // created at the moment we actually start streaming. Must run before the fan-out so the
+  // freshly-issued rtmp_url is in place when startFanOut reads it.
+  const fbDeferred = platformStreams.find((ps) => ps.platform === 'facebook' && !ps.broadcast_id);
+  if (fbDeferred) {
+    try {
+      const fb = await createFacebookLiveVideo(stream.name, stream.description);
+      db.prepare("UPDATE platform_streams SET broadcast_id = ?, rtmp_url = ? WHERE id = ?")
+        .run(fb.liveVideoId, fb.streamUrl, fbDeferred.id);
+      fbDeferred.broadcast_id = fb.liveVideoId;
+      fbDeferred.rtmp_url = fb.streamUrl;
+      logEvent(streamId, 'facebook', 'setup_success', `Live video ${fb.liveVideoId} created at go-live`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      db.prepare("UPDATE platform_streams SET status = 'error', error_message = ? WHERE id = ?")
+        .run(msg, fbDeferred.id);
+      // Drop it from this go-live so the fan-out doesn't try to use an empty URL.
+      platformStreams.splice(platformStreams.indexOf(fbDeferred), 1);
+      logEvent(streamId, 'facebook', 'setup_error', msg);
+    }
+  }
+
   // Mark stream as live
   db.prepare('UPDATE streams SET status = ?, started_at = ? WHERE id = ?').run('live', Date.now(), streamId);
   logEvent(streamId, null, 'go_live', `Starting fan-out to ${platformStreams.length} platforms`);
@@ -212,7 +339,11 @@ export async function goLive(streamId: string): Promise<void> {
     // the ingest connection is slow to establish.
     const publishFb = (attempt = 0): void => {
       publishFacebookLiveVideo(fbId)
-        .then(() => logEvent(streamId, 'facebook', 'published_live'))
+        .then(() => {
+          logEvent(streamId, 'facebook', 'published_live');
+          // Now that the broadcast is live, post the "we're live now" announcement with its link.
+          void postGoLiveAnnouncement(stream, fbId);
+        })
         .catch((err) => {
           if (attempt < 2) {
             setTimeout(() => publishFb(attempt + 1), 5000);

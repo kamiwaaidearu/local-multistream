@@ -1,5 +1,27 @@
 const BASE = '';
 
+// Facebook reminder schedule (mirrors server/stream/reminders.ts)
+export type ReminderWhen =
+  | { kind: 'sameDayAt'; time: string }
+  | { kind: 'weekdayBeforeAt'; weekday: number; time: string }
+  | { kind: 'beforeStart'; minutes: number };
+
+export interface ReminderRule {
+  id: string;
+  label: string;
+  enabled: boolean;
+  when: ReminderWhen;
+  template: string;
+}
+
+export interface ReminderSettings {
+  enabled: boolean;
+  timezone: string;
+  site: string;
+  rules: ReminderRule[];
+  goLivePost: { enabled: boolean; template: string };
+}
+
 function authHeaders(): Record<string, string> {
   const token = sessionStorage.getItem('auth_token');
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -101,4 +123,9 @@ export const api = {
     request<{ config_json: Record<string, unknown>; id: string; name: string }>('/api/studio/template/reset', { method: 'POST' }),
   uploadOverlay: (formData: FormData) =>
     authedFetch('/api/studio/overlay', { method: 'POST', body: formData }).then((r) => r.json()),
+
+  // Settings — Facebook reminder schedule
+  getReminderSettings: () => request<ReminderSettings>('/api/settings/reminders'),
+  updateReminderSettings: (settings: ReminderSettings) =>
+    request<ReminderSettings>('/api/settings/reminders', { method: 'PUT', body: JSON.stringify(settings) }),
 };

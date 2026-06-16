@@ -3,7 +3,8 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { nanoid } from 'nanoid';
-import { getDb } from '../db/index.js';
+import { getDb, getSetting, setSetting } from '../db/index.js';
+import { DEFAULT_REMINDER_SETTINGS, REMINDER_SETTINGS_KEY, type ReminderSettings } from '../stream/reminders.js';
 import type { Stream, PlatformStream } from '../types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -41,11 +42,13 @@ apiRouter.post('/streams', upload.single('thumbnail'), (req: Request, res: Respo
   const id = nanoid();
   const { name, description, scheduled_start, series_id } = req.body;
   const thumbnail_path = req.file ? `/uploads/${req.file.filename}` : null;
+  // Default Facebook reminders ON; only an explicit 'false'/'0' opts out.
+  const fbReminders = req.body.fb_reminders_enabled === 'false' || req.body.fb_reminders_enabled === '0' ? 0 : 1;
 
   db.prepare(`
-    INSERT INTO streams (id, series_id, name, description, thumbnail_path, scheduled_start, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)
-  `).run(id, series_id ?? null, name, description ?? null, thumbnail_path, scheduled_start ? parseInt(scheduled_start) : null, Date.now());
+    INSERT INTO streams (id, series_id, name, description, thumbnail_path, scheduled_start, fb_reminders_enabled, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+  `).run(id, series_id ?? null, name, description ?? null, thumbnail_path, scheduled_start ? parseInt(scheduled_start) : null, fbReminders, Date.now());
 
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream;
   res.status(201).json(stream);
@@ -89,6 +92,10 @@ apiRouter.patch('/streams/:id', upload.single('thumbnail'), async (req: Request,
   if (description !== undefined) { updates.push('description = ?'); values.push(description as string); }
   if (scheduled_start !== undefined) { updates.push('scheduled_start = ?'); values.push(scheduled_start ? parseInt(scheduled_start as string) : null); }
   if (thumbnail_path !== undefined) { updates.push('thumbnail_path = ?'); values.push(thumbnail_path); }
+  if (req.body.fb_reminders_enabled !== undefined) {
+    updates.push('fb_reminders_enabled = ?');
+    values.push(req.body.fb_reminders_enabled === 'false' || req.body.fb_reminders_enabled === '0' ? 0 : 1);
+  }
 
   if (updates.length > 0) {
     values.push(id);
@@ -138,6 +145,18 @@ apiRouter.patch('/streams/:id', upload.single('thumbnail'), async (req: Request,
     }
   }
 
+  // Re-sync scheduled Facebook announcement posts when the details that feed them change (or the
+  // reminders toggle flips). Re-creates the still-pending posts from the new details; already-
+  // published ones are left as-is. No-op if Facebook isn't set up for this stream yet.
+  if (name !== undefined || description !== undefined || scheduled_start !== undefined || req.body.fb_reminders_enabled !== undefined) {
+    try {
+      const { resyncFacebookReminders } = await import('../stream/manager.js');
+      await resyncFacebookReminders(id);
+    } catch (err) {
+      syncWarnings.push(`Facebook reminders: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   const response: Record<string, unknown> = { ...updated };
   if (syncWarnings.length > 0) {
     response.sync_warnings = syncWarnings;
@@ -166,9 +185,13 @@ apiRouter.delete('/streams/:id', async (req: Request, res: Response) => {
       if (ps.platform === 'youtube' && ps.broadcast_id) {
         const { deleteYouTubeBroadcast } = await import('../platforms/youtube.js');
         await deleteYouTubeBroadcast(ps.broadcast_id);
-      } else if (ps.platform === 'facebook' && ps.broadcast_id) {
-        const { deleteFacebookLiveVideo } = await import('../platforms/facebook.js');
-        await deleteFacebookLiveVideo(ps.broadcast_id);
+      } else if (ps.platform === 'facebook') {
+        const { deleteFacebookLiveVideo, deletePagePost } = await import('../platforms/facebook.js');
+        if (ps.broadcast_id) await deleteFacebookLiveVideo(ps.broadcast_id);
+        // Also remove any announcement posts created at setup (the event is being cancelled, so
+        // pull them whether or not they've published yet).
+        const posts = ps.extra_json ? (JSON.parse(ps.extra_json) as { announcement_posts?: Array<{ id: string }> }).announcement_posts : undefined;
+        for (const post of posts ?? []) await deletePagePost(post.id);
       }
     } catch (err) {
       console.warn(`[api] Failed to cleanup ${ps.platform} broadcast:`, err);
@@ -265,6 +288,23 @@ apiRouter.post('/series/:seriesId/setup', async (req: Request, res: Response) =>
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   }
+});
+
+// --- Settings: Facebook reminder schedule ---
+
+apiRouter.get('/settings/reminders', (_req: Request, res: Response) => {
+  res.json(getSetting<ReminderSettings>(REMINDER_SETTINGS_KEY) ?? DEFAULT_REMINDER_SETTINGS);
+});
+
+apiRouter.put('/settings/reminders', (req: Request, res: Response) => {
+  const body = req.body as ReminderSettings;
+  if (typeof body?.enabled !== 'boolean' || typeof body?.timezone !== 'string'
+    || typeof body?.site !== 'string' || !Array.isArray(body?.rules)) {
+    res.status(400).json({ error: 'Invalid reminder settings' });
+    return;
+  }
+  setSetting(REMINDER_SETTINGS_KEY, body);
+  res.json(body);
 });
 
 apiRouter.post('/streams/:id/go-live', async (req: Request, res: Response) => {

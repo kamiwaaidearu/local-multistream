@@ -215,7 +215,7 @@ Leave any platform's credentials blank to disable it — the app will still work
 | Platform | Scheduling support | Behavior |
 |----------|-------------------|----------|
 | YouTube  | Full API scheduling | Broadcast created immediately with `scheduledStartTime` — visible in YouTube Studio |
-| Facebook | Max 7 days ahead | Created if within 7 days; auto-created on app startup when the date approaches |
+| Facebook | Announcement post (auto) | The API can't schedule live videos or create events (both deprecated/partner-gated). The app schedules a plain **announcement post** (up to ~6 months out) for advance visibility; the live video itself is created and goes live at go-live. |
 | Twitch   | No scheduling API | Title/category stored locally, applied at go-live |
 
 **Batch creation:** "New Series" → pick start date, recurrence (weekly), number of events → enter unique title/description/thumbnail for each → "Create All" → "Setup All".
