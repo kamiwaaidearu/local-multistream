@@ -127,6 +127,38 @@ export function getFacebookPageToken(): { accessToken: string; pageId: string } 
   return { accessToken: cred.access_token, pageId: extra.page_id };
 }
 
+/**
+ * The Page's canonical public URL, preferring its vanity username
+ * (e.g. https://www.facebook.com/rosarymen). Resolved once via the Graph API and cached in the
+ * stored credentials; falls back to the numeric-id URL. Returns null if no Page is connected.
+ */
+export async function getFacebookPageUrl(): Promise<string | null> {
+  const db = getDb();
+  const cred = db.prepare('SELECT access_token, extra_json FROM credentials WHERE platform = ?').get('facebook') as {
+    access_token: string | null;
+    extra_json: string | null;
+  } | undefined;
+
+  if (!cred?.access_token || !cred.extra_json) return null;
+  const extra = JSON.parse(cred.extra_json);
+  if (!extra.page_id || extra.needs_page_selection) return null;
+  if (typeof extra.page_url === 'string') return extra.page_url; // cached
+
+  const fallback = `https://www.facebook.com/${extra.page_id}`;
+  try {
+    const API = `https://graph.facebook.com/${config.fbApiVersion}`;
+    const res = await fetch(`${API}/${extra.page_id}?fields=username,link&access_token=${encodeURIComponent(cred.access_token)}`);
+    if (res.ok) {
+      const data = await res.json() as { username?: string; link?: string };
+      const url = data.username ? `https://www.facebook.com/${data.username}` : (data.link ?? fallback);
+      extra.page_url = url;
+      db.prepare("UPDATE credentials SET extra_json = ? WHERE platform = 'facebook'").run(JSON.stringify(extra));
+      return url;
+    }
+  } catch { /* fall through to numeric fallback */ }
+  return fallback;
+}
+
 /** The currently-selected Page (id + name), or null if none is saved yet. */
 export function getSelectedFacebookPage(): { id: string; name: string } | null {
   const db = getDb();

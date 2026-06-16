@@ -1,7 +1,7 @@
 import { nanoid } from 'nanoid';
 import { getDb } from '../db/index.js';
 import { getYouTubeAuth } from '../auth/youtube.js';
-import { getFacebookPageToken } from '../auth/facebook.js';
+import { getFacebookPageToken, getFacebookPageUrl } from '../auth/facebook.js';
 import { getTwitchCredentials } from '../auth/twitch.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
 import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost } from '../platforms/facebook.js';
@@ -14,6 +14,11 @@ function logEvent(streamId: string | null, platform: string | null, event: strin
   db.prepare('INSERT INTO event_log (stream_id, platform, event, detail, ts) VALUES (?, ?, ?, ?, ?)').run(
     streamId, platform, event, detail ?? null, Date.now(),
   );
+}
+
+/** Public URL for a Facebook live video / VOD: {page}/videos/{id} when the Page URL is known. */
+function facebookVideoUrl(pageUrl: string | null, videoId: string): string {
+  return pageUrl ? `${pageUrl}/videos/${videoId}` : `https://www.facebook.com/watch/live/?v=${videoId}`;
 }
 
 /** A scheduled announcement: the Facebook post id plus its publish time (unix seconds). */
@@ -43,8 +48,7 @@ async function scheduleFacebookReminders(stream: Stream): Promise<ScheduledPost[
 
   // {page} links to the Facebook Page (where the live video surfaces once live) — the live
   // video itself doesn't exist until go-live, so an advance post can't link to it directly.
-  const pageId = getFacebookPageToken()?.pageId;
-  const pageUrl = pageId ? `https://www.facebook.com/${pageId}` : settings.site;
+  const pageUrl = (await getFacebookPageUrl()) ?? settings.site;
 
   const now = Math.floor(Date.now() / 1000);
   const minLead = 10 * 60;             // Facebook requires ≥ ~10 min ahead
@@ -108,9 +112,9 @@ async function postGoLiveAnnouncement(stream: Stream, broadcastId: string): Prom
   const settings = getReminderSettings();
   if (!settings.enabled || !settings.goLivePost?.enabled) return;
 
-  const pageId = getFacebookPageToken()?.pageId;
-  const pageUrl = pageId ? `https://www.facebook.com/${pageId}` : settings.site;
-  const videoUrl = `https://www.facebook.com/watch/live/?v=${broadcastId}`;
+  const fbPageUrl = await getFacebookPageUrl();
+  const pageUrl = fbPageUrl ?? settings.site;
+  const videoUrl = facebookVideoUrl(fbPageUrl, broadcastId);
 
   try {
     const postId = await createPagePost(renderReminder(settings.goLivePost.template, stream, settings, pageUrl, videoUrl));
@@ -396,7 +400,7 @@ export async function endStream(streamId: string): Promise<void> {
     try {
       await endFacebookLiveVideo(fbPs.broadcast_id);
       const extra = fbPs.extra_json ? JSON.parse(fbPs.extra_json) : {};
-      extra.vod_url = `https://www.facebook.com/watch/live/?v=${fbPs.broadcast_id}`;
+      extra.vod_url = facebookVideoUrl(await getFacebookPageUrl(), fbPs.broadcast_id);
       db.prepare("UPDATE platform_streams SET status = 'ended', extra_json = ? WHERE id = ?").run(JSON.stringify(extra), fbPs.id);
       logEvent(streamId, 'facebook', 'live_ended');
     } catch (err) {
