@@ -265,7 +265,7 @@ export async function endStream(streamId: string): Promise<void> {
     try {
       await endFacebookLiveVideo(fbPs.broadcast_id);
       const extra = fbPs.extra_json ? JSON.parse(fbPs.extra_json) : {};
-      extra.vod_url = `https://facebook.com/${fbPs.broadcast_id}`;
+      extra.vod_url = `https://www.facebook.com/watch/live/?v=${fbPs.broadcast_id}`;
       db.prepare("UPDATE platform_streams SET status = 'ended', extra_json = ? WHERE id = ?").run(JSON.stringify(extra), fbPs.id);
       logEvent(streamId, 'facebook', 'live_ended');
     } catch (err) {
