@@ -1,0 +1,6 @@
+{
+  "// purpose": "Type-checks the test files (and their imports) without coupling the production build to test-only devDeps. Run via `npm test`.",
+  "extends": "./tsconfig.json",
+  "include": ["src"],
+  "exclude": []
+}

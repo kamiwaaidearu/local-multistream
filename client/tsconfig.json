@@ -17,5 +17,7 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "// exclude": "Test files are checked by tsconfig.test.json, not the production build — so `npm run build` (and an --omit=dev install) doesn't depend on test-only devDeps.",
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/test"]
 }
