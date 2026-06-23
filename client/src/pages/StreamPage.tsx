@@ -21,6 +21,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import { api } from '../lib/api';
 import { useSSE } from '../hooks/useSSE';
+import { useStudioLive, isIntentionalExit } from '../lib/studioLive';
 import { FFmpegLog } from '../components/FFmpegLog';
 import { PlatformStatusCard } from '../components/PlatformStatusCard';
 import { EventLogCard } from '../components/EventLogCard';
@@ -126,11 +127,26 @@ export function StreamPage() {
 
   useEffect(() => {
     function handler(e: BeforeUnloadEvent) {
-      if (isLiveRef.current) e.preventDefault();
+      // Skip the native prompt for an intentional logout — the logout modal already confirmed.
+      if (isLiveRef.current && !isIntentionalExit()) e.preventDefault();
     }
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, []);
+
+  // Tell the app shell when THIS tab is the live Web Studio source, so the global guard can
+  // intercept in-app navigation away (which would unmount the capture and interrupt the broadcast)
+  // and end the stream cleanly. OBS-sourced live streams stay null — OBS publishes independently,
+  // so leaving is safe. 'connecting' counts as live too: during a reconnect the broadcast is still
+  // up and leaving would still kill it.
+  const { setLiveStreamId } = useStudioLive();
+  const studioIsLiveSource =
+    stream?.status === 'live' && mode === 'studio' &&
+    (studioStatus === 'connected' || studioStatus === 'connecting');
+  useEffect(() => {
+    setLiveStreamId(studioIsLiveSource ? (stream?.id ?? null) : null);
+    return () => setLiveStreamId(null);
+  }, [studioIsLiveSource, stream?.id, setLiveStreamId]);
 
   const refreshStream = useCallback(async () => {
     if (!id) return;
