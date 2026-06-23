@@ -16,6 +16,15 @@ function envInt(key: string, fallback: number): number {
   return parsed;
 }
 
+// Parse TRUST_PROXY into an Express `trust proxy` value. null = disabled (the safe default).
+function parseTrustProxy(raw: string | undefined): boolean | number | string | null {
+  const v = (raw ?? '').trim();
+  if (!v || ['false', 'off', 'no', '0'].includes(v.toLowerCase())) return null;
+  if (v.toLowerCase() === 'true') return true;
+  if (/^\d+$/.test(v)) return parseInt(v, 10);
+  return v; // subnet / IP list
+}
+
 export const config = Object.freeze({
   port: envInt('PORT', 3000),
   httpsPort: envInt('HTTPS_PORT', 3443),
@@ -23,12 +32,12 @@ export const config = Object.freeze({
   localStreamKey: env('LOCAL_STREAM_KEY', 'multistream-live'),
   fbApiVersion: env('FB_API_VERSION', 'v25.0'),
   appSecret: process.env.APP_SECRET ?? '',
-  // Express `trust proxy`. Empty = trust no proxy (req.ip is the direct socket address — the safe
-  // default, and what the login rate limiter keys on). Set this ONLY when running behind a reverse
-  // proxy, so the limiter sees the real client IP instead of every request collapsing to the
-  // proxy's. Enabling it without a proxy would let clients spoof their IP via X-Forwarded-For.
-  // Accepts 'true', a hop count (e.g. '1'), or a subnet/IP.
-  trustProxy: process.env.TRUST_PROXY ?? '',
+  // Express `trust proxy`, parsed from TRUST_PROXY. null = trust no proxy (req.ip is the direct
+  // socket address — the safe default). Set it when behind a reverse proxy / Cloudflare Tunnel so
+  // the login limiter keys on the real client IP instead of every request collapsing to the
+  // proxy's address. Enabling it without a proxy would let clients spoof their IP. Accepts 'true',
+  // a hop count (e.g. '1'), or a subnet/IP; 'false'/'off'/'0'/empty disable it.
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
   // Web Studio re-encode quality (kbps). Tunable for your upload bandwidth — note the
   // server fans this out to EACH platform, so total upload ≈ videoBitrate × (# platforms).
   studioVideoBitrateKbps: envInt('STUDIO_VIDEO_BITRATE', 4500),

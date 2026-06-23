@@ -9,7 +9,7 @@
     "dev:client": "cd client && npm run dev",
     "build": "cd client && npm run build",
     "start": "cross-env NODE_ENV=production tsx server/index.ts",
-    "test": "node --import tsx --test server/studio/loginRateLimiter.test.ts server/studio/authCrypto.test.ts server/studio/bandwidthProbe.test.ts && npm --prefix client run test"
+    "test": "node --import tsx --test server/studio/loginRateLimiter.test.ts server/studio/authCrypto.test.ts server/studio/bandwidthProbe.test.ts server/studio/clientIp.test.ts && npm --prefix client run test"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

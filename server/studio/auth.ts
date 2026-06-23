@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { getDb } from '../db/index.js';
 import { hashSecret, safeEqual } from './authCrypto.js';
 import { LoginRateLimiter } from './loginRateLimiter.js';
+import { resolveClientIp } from './clientIp.js';
 
 /**
  * Validate a token against the app secret.
@@ -69,10 +70,16 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 const loginLimiter = new LoginRateLimiter();
 
 function clientIp(req: Request): string {
-  // req.ip honors the app's `trust proxy` setting (off by default — see TRUST_PROXY in config).
-  // Without a proxy it's the direct socket address and can't be spoofed via X-Forwarded-For.
-  // The 'unknown' fallback fails closed (a shared, stricter bucket).
-  return req.ip || req.socket.remoteAddress || 'unknown';
+  // Behind a Cloudflare Tunnel (the default deployment), every request reaches Express from
+  // localhost, so we must read the forwarded client IP — but only when TRUST_PROXY is set, or a
+  // client could spoof it. resolveClientIp prefers Cloudflare's CF-Connecting-IP, then req.ip.
+  const cf = req.headers['cf-connecting-ip'];
+  return resolveClientIp({
+    trustProxy: config.trustProxy !== null,
+    cfConnectingIp: typeof cf === 'string' ? cf : undefined,
+    forwardedIp: req.ip,
+    socketIp: req.socket.remoteAddress,
+  });
 }
 
 // Is a stream currently live? Same source of truth as goLive's concurrent-stream guard. Cheap
