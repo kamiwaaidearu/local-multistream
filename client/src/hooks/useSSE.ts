@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { getAuthToken } from '../lib/authToken';
 
 export interface SSEEvent {
   type: string;
@@ -18,7 +19,7 @@ export function useSSE(url: string, enabled = true) {
     if (!enabled) return;
 
     // EventSource can't set headers, so pass the auth token as a query param.
-    const token = sessionStorage.getItem('auth_token') ?? '';
+    const token = getAuthToken();
     const fullUrl = token
       ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
       : url;

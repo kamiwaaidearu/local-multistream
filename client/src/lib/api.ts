@@ -1,3 +1,5 @@
+import { getAuthToken, clearAuthToken } from './authToken';
+
 const BASE = '';
 
 // Facebook reminder schedule (mirrors server/stream/reminders.ts)
@@ -23,7 +25,7 @@ export interface ReminderSettings {
 }
 
 function authHeaders(): Record<string, string> {
-  const token = sessionStorage.getItem('auth_token');
+  const token = getAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -36,7 +38,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     // Clear token and redirect to login if auth is required
     const authCheck = await fetch('/api/auth/check').then((r) => r.json()).catch(() => ({ required: false }));
     if (authCheck.required) {
-      sessionStorage.removeItem('auth_token');
+      clearAuthToken();
       // Don't redirect if we're already on the login page — a 401 from a background call
       // (e.g. the header's auth-status fetch) would otherwise reload /login endlessly.
       if (window.location.pathname !== '/login') {

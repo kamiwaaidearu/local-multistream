@@ -4,6 +4,7 @@ import { Modal, Stack, Text, Group, Button } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { api } from '../lib/api';
 import { useStudioLive, markIntentionalExit } from '../lib/studioLive';
+import { clearAuthToken } from '../lib/authToken';
 
 interface LiveNavigationGuardProps {
   // The "Log out" button lives in the app navbar, so its open state is lifted to App.
@@ -55,7 +56,7 @@ export function LiveNavigationGuard({ logoutOpen, onLogoutOpenChange }: LiveNavi
     // The logout modal already confirmed; suppress StreamPage's beforeunload so the browser
     // doesn't prompt a second time on the redirect.
     markIntentionalExit();
-    sessionStorage.removeItem('auth_token');
+    clearAuthToken();
     // Full navigation (not client-side) so AuthGate + header re-evaluate without the token.
     window.location.href = '/login';
   }

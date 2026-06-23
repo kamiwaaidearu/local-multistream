@@ -18,6 +18,7 @@ import { notifications } from '@mantine/notifications';
 import { useCanvasCompositor, type GridTemplate } from '../hooks/useCanvasCompositor';
 import { useAudioMixer } from '../hooks/useAudioMixer';
 import { useStudioStream } from '../hooks/useStudioStream';
+import { measureUploadMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, recommendQuality, type QualityKey } from '../lib/bandwidthProbe';
 import { FALLBACK_TEMPLATE } from '../lib/gridTemplate';
 import { TemplateEditor } from './TemplateEditor';
 import { api } from '../lib/api';
@@ -48,6 +49,13 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   // Advanced sections (hidden by default to keep the operator view simple)
   const [showAudio, setShowAudio] = useState(false);
   const [showLayout, setShowLayout] = useState(false);
+
+  // Stream quality (Leg-1 / browser encode bitrate). Defaults to Medium; "Test my connection"
+  // measures the operator's upload and pre-selects a preset their link should sustain.
+  const [quality, setQuality] = useState<QualityKey>('medium');
+  const [probing, setProbing] = useState(false);
+  const [probeMbps, setProbeMbps] = useState<number | null>(null);
+  const [recommendedQuality, setRecommendedQuality] = useState<QualityKey | null>(null);
 
   // Load template
   useEffect(() => {
@@ -194,12 +202,38 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   } = useStudioStream({
     compositeVideoStream: compositeStream,
     mixedAudioStream: mixedStream,
+    videoBitsPerSecond: QUALITY_PRESETS[quality].videoBps,
   });
 
   // Lift status to parent
   useEffect(() => {
     onStatusChange(studioStatus);
   }, [studioStatus, onStatusChange]);
+
+  const live = studioStatus === 'connected' || studioStatus === 'connecting';
+
+  // Measure upload bandwidth to the server and pre-select a quality the connection can sustain.
+  const handleTestConnection = useCallback(async () => {
+    setProbing(true);
+    setProbeMbps(null);
+    setRecommendedQuality(null);
+    try {
+      const mbps = await measureUploadMbps();
+      setProbeMbps(mbps);
+      const rec = recommendQuality(mbps);
+      setQuality(rec);
+      setRecommendedQuality(rec);
+      notifications.show({
+        title: 'Connection test complete',
+        message: `Upload ~${mbps.toFixed(1)} Mbps → recommended ${QUALITY_PRESETS[rec].label}`,
+        color: 'green',
+      });
+    } catch (err) {
+      notifications.show({ title: 'Connection test failed', message: String(err), color: 'red' });
+    } finally {
+      setProbing(false);
+    }
+  }, []);
 
   // Expose connect/disconnect to parent via refs
   useEffect(() => {
@@ -367,6 +401,45 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
             </Group>
           </Stack>
         </Group>
+      </Card>
+
+      {/* Stream quality */}
+      <Card withBorder padding="sm">
+        <Stack gap={6}>
+          <Group justify="space-between" wrap="nowrap" gap="xs" align="center">
+            <Text size="sm" fw={500}>Stream quality</Text>
+            <Button
+              size="compact-xs"
+              variant="light"
+              onClick={handleTestConnection}
+              loading={probing}
+              disabled={live}
+            >
+              Test my connection
+            </Button>
+          </Group>
+          <Select
+            size="xs"
+            data={Object.values(QUALITY_PRESETS).map((p) => ({ value: p.key, label: p.label }))}
+            value={quality}
+            onChange={(v) => v && setQuality(v as QualityKey)}
+            disabled={live}
+            allowDeselect={false}
+          />
+          {probeMbps !== null && recommendedQuality && (
+            <Text size="xs" c="dimmed">
+              Measured upload ~{probeMbps.toFixed(1)} Mbps · recommended {QUALITY_PRESETS[recommendedQuality].label}
+            </Text>
+          )}
+          {probeMbps !== null && probeMbps < MIN_VIABLE_MBPS && (
+            <Text size="xs" c="red">
+              Your upload looks low — even Low may buffer. A wired connection will help if you have one.
+            </Text>
+          )}
+          {live && (
+            <Text size="xs" c="dimmed">Quality is locked while you’re live — stop the stream to change it.</Text>
+          )}
+        </Stack>
       </Card>
 
       {/* Advanced — audio levels */}

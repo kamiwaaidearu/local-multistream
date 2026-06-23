@@ -9,6 +9,7 @@ import { Login } from './pages/Login';
 import { api } from './lib/api';
 import { StudioLiveContext } from './lib/studioLive';
 import { LiveNavigationGuard } from './components/LiveNavigationGuard';
+import { getAuthToken } from './lib/authToken';
 
 function AuthGate({ children }: { children: React.ReactNode }) {
   const location = useLocation();
@@ -18,7 +19,7 @@ function AuthGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     api.checkAuth()
       .then(({ required }) => {
-        if (required && !sessionStorage.getItem('auth_token')) {
+        if (required && !getAuthToken()) {
           setNeedsAuth(true);
         }
       })
@@ -47,7 +48,7 @@ export function App() {
 
   // Only show "Log out" when a session token exists (auth enabled + logged in). In no-auth
   // mode there's no token, so the button stays hidden.
-  const authToken = sessionStorage.getItem('auth_token');
+  const authToken = getAuthToken();
 
   return (
     <StudioLiveContext.Provider value={studioLiveValue}>

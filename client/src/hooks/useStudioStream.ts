@@ -1,4 +1,7 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
+import { wsUrl } from '../lib/ws';
+import { QUALITY_PRESETS } from '../lib/bandwidthProbe';
+import { getAuthToken } from '../lib/authToken';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -6,6 +9,7 @@ interface UseStudioStreamOptions {
   compositeVideoStream: MediaStream | null;
   mixedAudioStream: MediaStream | null;
   timeslice?: number; // ms between chunks, default 1000
+  videoBitsPerSecond?: number; // MediaRecorder video target; defaults to the medium preset
 }
 
 interface UseStudioStreamResult {
@@ -14,11 +18,6 @@ interface UseStudioStreamResult {
   disconnect: () => void;
   error: string | null;
   backpressureWarning: boolean;
-}
-
-function getWsUrl(): string {
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${window.location.host}/ws/studio`;
 }
 
 // Reconnect schedule. The first delay is deliberately not tiny: the server needs a moment
@@ -30,6 +29,7 @@ export function useStudioStream({
   compositeVideoStream,
   mixedAudioStream,
   timeslice = 1000,
+  videoBitsPerSecond = QUALITY_PRESETS.medium.videoBps,
 }: UseStudioStreamOptions): UseStudioStreamResult {
   const [status, setStatus] = useState<StudioStatus>('disconnected');
   const [error, setError] = useState<string | null>(null);
@@ -48,6 +48,12 @@ export function useStudioStream({
   videoStreamRef.current = compositeVideoStream;
   const audioStreamRef = useRef(mixedAudioStream);
   audioStreamRef.current = mixedAudioStream;
+
+  // Read the latest selected bitrate at connect time. MediaRecorder's bitrate is fixed at
+  // construction, so a change only takes effect on the next connect — which is the intended UX:
+  // the operator picks quality before going live.
+  const videoBitrateRef = useRef(videoBitsPerSecond);
+  videoBitrateRef.current = videoBitsPerSecond;
 
   // Breaks the openSocket <-> scheduleReconnect dependency cycle.
   const openSocketRef = useRef<() => void>(() => {});
@@ -115,8 +121,8 @@ export function useStudioStream({
     if (audio) tracks.push(...audio.getAudioTracks());
     const combinedStream = new MediaStream(tracks);
 
-    const token = sessionStorage.getItem('auth_token') ?? '';
-    const ws = new WebSocket(`${getWsUrl()}?token=${token}`);
+    const token = getAuthToken();
+    const ws = new WebSocket(`${wsUrl('/ws/studio')}?token=${token}`);
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
 
@@ -130,7 +136,7 @@ export function useStudioStream({
 
       const recorder = new MediaRecorder(combinedStream, {
         mimeType,
-        videoBitsPerSecond: 8_000_000,
+        videoBitsPerSecond: videoBitrateRef.current,
         audioBitsPerSecond: 160_000,
       });
       recorderRef.current = recorder;

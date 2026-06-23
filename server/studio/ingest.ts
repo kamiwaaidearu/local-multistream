@@ -4,6 +4,7 @@ import { spawn, ChildProcess } from 'child_process';
 import { config } from '../config.js';
 import { validateToken } from './auth.js';
 import { isObsConnected } from '../rtmp/server.js';
+import { handleBandwidthProbe } from './bandwidthProbe.js';
 
 let ffmpegPath: string;
 try {
@@ -163,12 +164,14 @@ function handleConnection(ws: WebSocket): void {
  */
 export function initStudioWebSocket(...servers: HttpServer[]): void {
   for (const server of servers) {
-    const wss = new WebSocketServer({ noServer: true });
+    // perMessageDeflate off: the ingest payload (webm) is already compressed, and for the
+    // bandwidth probe compression would inflate the measured throughput into a fiction.
+    const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
     server.on('upgrade', (request: IncomingMessage, socket, head) => {
       const url = new URL(request.url ?? '', `http://${request.headers.host}`);
 
-      if (url.pathname !== '/ws/studio') return;
+      if (url.pathname !== '/ws/studio' && url.pathname !== '/ws/bandwidth') return;
 
       // Authenticate via query param
       const token = url.searchParams.get('token') ?? '';
@@ -180,12 +183,16 @@ export function initStudioWebSocket(...servers: HttpServer[]): void {
       }
 
       wss.handleUpgrade(request, socket, head, (ws) => {
-        handleConnection(ws);
+        if (url.pathname === '/ws/bandwidth') {
+          handleBandwidthProbe(ws, { isBusy: () => studioConnected || isObsConnected() });
+        } else {
+          handleConnection(ws);
+        }
       });
     });
   }
 
-  console.log('[studio] WebSocket server initialized on /ws/studio');
+  console.log('[studio] WebSocket server initialized on /ws/studio and /ws/bandwidth');
 }
 
 /**

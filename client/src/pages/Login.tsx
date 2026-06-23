@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Center, Card, Stack, Title, TextInput, Button, Text } from '@mantine/core';
 import { api } from '../lib/api';
+import { setAuthToken } from '../lib/authToken';
 
 export function Login() {
   const [secret, setSecret] = useState('');
@@ -14,7 +15,7 @@ export function Login() {
 
     try {
       const { token } = await api.login(secret);
-      sessionStorage.setItem('auth_token', token);
+      setAuthToken(token);
       // Full navigation (not client-side) so AuthGate + header re-evaluate with the new token.
       window.location.href = '/';
     } catch (err) {

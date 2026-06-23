@@ -27,7 +27,7 @@ export function useCanvasCompositor({
   template,
   webcamStream,
   screenStream,
-  fps = 60,
+  fps = 30, // 30fps suits slides + a talking head — sharper per bit than 60; keep server GOP at 2×fps
 }: UseCanvasCompositorOptions): UseCanvasCompositorResult {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [compositeStream, setCompositeStream] = useState<MediaStream | null>(null);
