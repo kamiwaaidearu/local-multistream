@@ -8,7 +8,8 @@
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "cd client && npm run dev",
     "build": "cd client && npm run build",
-    "start": "cross-env NODE_ENV=production tsx server/index.ts"
+    "start": "cross-env NODE_ENV=production tsx server/index.ts",
+    "test": "node --import tsx --test server/studio/loginRateLimiter.test.ts server/studio/authCrypto.test.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

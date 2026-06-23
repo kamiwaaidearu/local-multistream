@@ -14,6 +14,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 
+// Behind a reverse proxy, honor X-Forwarded-For so the per-IP login limiter keys on the real
+// client IP rather than the proxy's. Off by default — enabling it when NOT proxied would let
+// clients spoof their IP. See TRUST_PROXY in config.ts.
+const tp = config.trustProxy.trim();
+const tpOff = ['', 'false', 'off', 'no', '0'].includes(tp.toLowerCase());
+if (!tpOff) {
+  app.set('trust proxy', tp === 'true' ? true : /^\d+$/.test(tp) ? parseInt(tp, 10) : tp);
+}
+
 // Middleware
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
