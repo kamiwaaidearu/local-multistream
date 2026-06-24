@@ -1,131 +1,102 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 
-interface UseAudioMixerOptions {
-  micStream: MediaStream | null;
-  tabAudioStream: MediaStream | null;
+export type AudioSourceKind = 'microphone' | 'desktop' | 'slides';
+
+export interface AudioSource {
+  id: string;
+  label: string;
+  kind: AudioSourceKind;
+  /** For microphones, the input device id — lets the UI avoid offering a device that's already added. */
+  deviceId?: string;
+  gain: number; // user-set level, 0..2
+  muted: boolean;
+}
+
+export interface AddAudioSourceInput {
+  stream: MediaStream;
+  label: string;
+  kind: AudioSourceKind;
+  deviceId?: string;
+}
+
+interface InternalNode {
+  stream: MediaStream;
+  sourceNode: MediaStreamAudioSourceNode;
+  gainNode: GainNode;
+  analyser: AnalyserNode;
+  data: Uint8Array<ArrayBuffer>;
+  gain: number;
+  muted: boolean;
 }
 
 interface UseAudioMixerResult {
+  /** Single mixed audio track (sum of every source) — stable for the life of the hook. */
   mixedStream: MediaStream | null;
-  micGain: number;
-  tabGain: number;
-  setMicGain: (value: number) => void;
-  setTabGain: (value: number) => void;
-  audioLevel: number; // 0-1 RMS level for metering
-  resume: () => void; // resume the AudioContext from a user gesture (it may start suspended)
+  sources: AudioSource[];
+  /** Per-source RMS levels (0..1), keyed by source id, refreshed ~10×/s for metering. */
+  levels: Record<string, number>;
+  addSource: (input: AddAudioSourceInput) => string | null;
+  removeSource: (id: string) => void;
+  setGain: (id: string, value: number) => void;
+  setMuted: (id: string, muted: boolean) => void;
+  /** Resume the AudioContext from a user gesture (it may start suspended → silent). */
+  resume: () => void;
 }
 
-export function useAudioMixer({ micStream, tabAudioStream }: UseAudioMixerOptions): UseAudioMixerResult {
+/**
+ * OBS-style audio mixer. Any number of independent sources — microphones, desktop
+ * audio, slide/tab audio — each with its own volume, mute, and level meter, all summed
+ * into one output track for the encoder. The set of sources is fully dynamic; nothing
+ * here is tied to the camera or the screen share.
+ */
+export function useAudioMixer(): UseAudioMixerResult {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const destinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
-  const micGainNodeRef = useRef<GainNode | null>(null);
-  const tabGainNodeRef = useRef<GainNode | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const tabSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const nodesRef = useRef<Map<string, InternalNode>>(new Map());
   const levelIntervalRef = useRef<number>(0);
 
   const [mixedStream, setMixedStream] = useState<MediaStream | null>(null);
-  const [micGain, setMicGainState] = useState(1);
-  const [tabGain, setTabGainState] = useState(1);
-  const [audioLevel, setAudioLevel] = useState(0);
+  const [sources, setSources] = useState<AudioSource[]>([]);
+  const [levels, setLevels] = useState<Record<string, number>>({});
 
-  // Initialize AudioContext and nodes
+  // Create the context + mix bus once. Every source fans into this one destination.
   useEffect(() => {
     const ctx = new AudioContext();
     audioCtxRef.current = ctx;
 
     const destination = ctx.createMediaStreamDestination();
     destinationRef.current = destination;
-
-    const micGainNode = ctx.createGain();
-    micGainNodeRef.current = micGainNode;
-    micGainNode.connect(destination);
-
-    const tabGainNode = ctx.createGain();
-    tabGainNodeRef.current = tabGainNode;
-    tabGainNode.connect(destination);
-
-    const analyser = ctx.createAnalyser();
-    analyserRef.current = analyser;
-    analyser.fftSize = 256;
-    micGainNode.connect(analyser);
-    tabGainNode.connect(analyser);
-
     setMixedStream(destination.stream);
 
-    // Level metering
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    // Per-source metering: read each source's analyser and publish an RMS level.
     levelIntervalRef.current = window.setInterval(() => {
-      analyser.getByteTimeDomainData(dataArray);
-      let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) {
-        const normalized = (dataArray[i] - 128) / 128;
-        sum += normalized * normalized;
-      }
-      setAudioLevel(Math.sqrt(sum / dataArray.length));
+      const next: Record<string, number> = {};
+      nodesRef.current.forEach((node, id) => {
+        node.analyser.getByteTimeDomainData(node.data);
+        let sum = 0;
+        for (let i = 0; i < node.data.length; i++) {
+          const normalized = (node.data[i] - 128) / 128;
+          sum += normalized * normalized;
+        }
+        next[id] = Math.sqrt(sum / node.data.length);
+      });
+      setLevels(next);
     }, 100);
 
     return () => {
       window.clearInterval(levelIntervalRef.current);
-      ctx.close();
+      nodesRef.current.forEach((node) => {
+        try { node.sourceNode.disconnect(); } catch { /* ignore */ }
+        try { node.gainNode.disconnect(); } catch { /* ignore */ }
+        try { node.analyser.disconnect(); } catch { /* ignore */ }
+        node.stream.getTracks().forEach((t) => t.stop());
+      });
+      nodesRef.current.clear();
+      void ctx.close().catch(() => {});
       audioCtxRef.current = null;
+      destinationRef.current = null;
       setMixedStream(null);
     };
-  }, []);
-
-  // Connect/disconnect mic source
-  useEffect(() => {
-    const ctx = audioCtxRef.current;
-    const gainNode = micGainNodeRef.current;
-    if (!ctx || !gainNode) return;
-
-    // Disconnect previous
-    if (micSourceRef.current) {
-      try { micSourceRef.current.disconnect(); } catch { /* ignore */ }
-      micSourceRef.current = null;
-    }
-
-    if (micStream && micStream.getAudioTracks().length > 0) {
-      const source = ctx.createMediaStreamSource(micStream);
-      source.connect(gainNode);
-      micSourceRef.current = source;
-      // A context created without a user gesture starts suspended → silent output.
-      void ctx.resume().catch(() => {});
-    }
-  }, [micStream]);
-
-  // Connect/disconnect tab audio source
-  useEffect(() => {
-    const ctx = audioCtxRef.current;
-    const gainNode = tabGainNodeRef.current;
-    if (!ctx || !gainNode) return;
-
-    if (tabSourceRef.current) {
-      try { tabSourceRef.current.disconnect(); } catch { /* ignore */ }
-      tabSourceRef.current = null;
-    }
-
-    if (tabAudioStream && tabAudioStream.getAudioTracks().length > 0) {
-      const source = ctx.createMediaStreamSource(tabAudioStream);
-      source.connect(gainNode);
-      tabSourceRef.current = source;
-      void ctx.resume().catch(() => {});
-    }
-  }, [tabAudioStream]);
-
-  const setMicGain = useCallback((value: number) => {
-    setMicGainState(value);
-    if (micGainNodeRef.current) {
-      micGainNodeRef.current.gain.value = value;
-    }
-  }, []);
-
-  const setTabGain = useCallback((value: number) => {
-    setTabGainState(value);
-    if (tabGainNodeRef.current) {
-      tabGainNodeRef.current.gain.value = value;
-    }
   }, []);
 
   const resume = useCallback(() => {
@@ -135,5 +106,83 @@ export function useAudioMixer({ micStream, tabAudioStream }: UseAudioMixerOption
     }
   }, []);
 
-  return { mixedStream, micGain, tabGain, setMicGain, setTabGain, audioLevel, resume };
+  const removeSource = useCallback((id: string) => {
+    const node = nodesRef.current.get(id);
+    if (!node) return;
+    try { node.sourceNode.disconnect(); } catch { /* ignore */ }
+    try { node.gainNode.disconnect(); } catch { /* ignore */ }
+    try { node.analyser.disconnect(); } catch { /* ignore */ }
+    node.stream.getTracks().forEach((t) => t.stop());
+    nodesRef.current.delete(id);
+    setSources((prev) => prev.filter((s) => s.id !== id));
+    setLevels((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  const addSource = useCallback((input: AddAudioSourceInput): string | null => {
+    const ctx = audioCtxRef.current;
+    const destination = destinationRef.current;
+    if (!ctx || !destination) return null;
+    if (input.stream.getAudioTracks().length === 0) return null;
+
+    const id = crypto.randomUUID();
+    const sourceNode = ctx.createMediaStreamSource(input.stream);
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 1;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+
+    sourceNode.connect(gainNode);
+    gainNode.connect(destination);
+    gainNode.connect(analyser);
+
+    nodesRef.current.set(id, {
+      stream: input.stream,
+      sourceNode,
+      gainNode,
+      analyser,
+      data: new Uint8Array(analyser.frequencyBinCount),
+      gain: 1,
+      muted: false,
+    });
+
+    // Auto-remove if the track ends on its own: a device unplugged, or the operator
+    // clicking the browser's "Stop sharing" bar on a desktop/tab capture.
+    input.stream.getAudioTracks().forEach((t) => {
+      t.addEventListener('ended', () => removeSource(id));
+    });
+
+    setSources((prev) => [
+      ...prev,
+      { id, label: input.label, kind: input.kind, deviceId: input.deviceId, gain: 1, muted: false },
+    ]);
+
+    // The add button is a user gesture — safe to (re)start a suspended context here.
+    void ctx.resume().catch(() => {});
+    return id;
+  }, [removeSource]);
+
+  const setGain = useCallback((id: string, value: number) => {
+    const node = nodesRef.current.get(id);
+    if (node) {
+      node.gain = value;
+      node.gainNode.gain.value = node.muted ? 0 : value;
+    }
+    setSources((prev) => prev.map((s) => (s.id === id ? { ...s, gain: value } : s)));
+  }, []);
+
+  const setMuted = useCallback((id: string, muted: boolean) => {
+    const node = nodesRef.current.get(id);
+    if (node) {
+      node.muted = muted;
+      node.gainNode.gain.value = muted ? 0 : node.gain;
+    }
+    setSources((prev) => prev.map((s) => (s.id === id ? { ...s, muted } : s)));
+  }, []);
+
+  return { mixedStream, sources, levels, addSource, removeSource, setGain, setMuted, resume };
 }

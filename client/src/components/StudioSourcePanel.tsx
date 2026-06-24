@@ -16,7 +16,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useCanvasCompositor, type GridTemplate } from '../hooks/useCanvasCompositor';
-import { useAudioMixer } from '../hooks/useAudioMixer';
+import { useAudioMixer, type AudioSourceKind } from '../hooks/useAudioMixer';
 import { useStudioStream } from '../hooks/useStudioStream';
 import { measureUploadMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, recommendQuality, type QualityKey } from '../lib/bandwidthProbe';
 import { FALLBACK_TEMPLATE } from '../lib/gridTemplate';
@@ -24,6 +24,12 @@ import { TemplateEditor } from './TemplateEditor';
 import { api } from '../lib/api';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+const KIND_META: Record<AudioSourceKind, { label: string; color: string }> = {
+  microphone: { label: 'Mic', color: 'blue' },
+  desktop: { label: 'Desktop', color: 'grape' },
+  slides: { label: 'Slides', color: 'teal' },
+};
 
 interface StudioSourcePanelProps {
   onStatusChange: (status: StudioStatus) => void;
@@ -38,7 +44,6 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   // Media sources
   const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
-  const [screenAudioStream, setScreenAudioStream] = useState<MediaStream | null>(null);
   const [webcamDevices, setWebcamDevices] = useState<MediaDeviceInfo[]>([]);
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
@@ -47,7 +52,6 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   const [screenEnabled, setScreenEnabled] = useState(false);
 
   // Advanced sections (hidden by default to keep the operator view simple)
-  const [showAudio, setShowAudio] = useState(false);
   const [showLayout, setShowLayout] = useState(false);
 
   // Stream quality (Leg-1 / browser encode bitrate). Defaults to Medium; "Test my connection"
@@ -89,33 +93,24 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
       .catch(() => {});
   }, [selectedDeviceId, selectedMicId]);
 
-  // Keep refs to the live streams so the unmount cleanup stops the CURRENT tracks. A bare `[]`
-  // effect closes over the initial nulls and would stop nothing — leaving the camera, mic, and
-  // screen/tab share running after the stream ends.
+  // Keep refs to the live video streams so the unmount cleanup stops the CURRENT tracks. A bare
+  // `[]` effect closes over the initial nulls and would stop nothing — leaving the camera and
+  // screen share running after the stream ends. (Audio source tracks are owned/stopped by the mixer.)
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const screenAudioStreamRef = useRef<MediaStream | null>(null);
   webcamStreamRef.current = webcamStream;
   screenStreamRef.current = screenStream;
-  screenAudioStreamRef.current = screenAudioStream;
 
-  // Stop all source media (camera, mic, screen/tab share) when the panel unmounts — which
-  // happens when the stream ends or you leave the page.
+  // Stop camera + screen-share video when the panel unmounts — which happens when the stream
+  // ends or you leave the page.
   useEffect(() => {
     return () => {
       webcamStreamRef.current?.getTracks().forEach((t) => t.stop());
       screenStreamRef.current?.getTracks().forEach((t) => t.stop());
-      screenAudioStreamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, []);
 
-  // Mic stream — useMemo to avoid re-creating on every render
-  const micStream = useMemo(
-    () => webcamStream ? new MediaStream(webcamStream.getAudioTracks()) : null,
-    [webcamStream],
-  );
-
-  // Compositor
+  // Compositor — camera is video-only now; audio is handled entirely by the mixer.
   const { canvasRef, compositeStream } = useCanvasCompositor({
     template,
     webcamStream: useMemo(
@@ -125,13 +120,14 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     screenStream,
   });
 
-  // Audio mixer
-  const { mixedStream, micGain, tabGain, setMicGain, setTabGain, audioLevel, resume } = useAudioMixer({
-    micStream,
-    tabAudioStream: screenAudioStream,
-  });
+  // Audio mixer — N independent sources (mics, desktop audio, slide audio), each with its own
+  // volume / mute / meter, summed into one track for the encoder.
+  const { mixedStream, sources, levels, addSource, removeSource, setGain, setMuted, resume } = useAudioMixer();
 
-  // Start/stop webcam
+  // Track the slide-audio source so we can drop it from the mix when the screen share stops.
+  const slideSourceIdRef = useRef<string | null>(null);
+
+  // Start/stop camera (video only)
   const toggleWebcam = useCallback(async () => {
     if (webcamEnabled && webcamStream) {
       webcamStream.getTracks().forEach((t) => t.stop());
@@ -141,24 +137,25 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     }
 
     try {
-      resume(); // ensure the audio context is running (this click is a user gesture)
       const stream = await navigator.mediaDevices.getUserMedia({
         video: selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : true,
-        audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true,
       });
       setWebcamStream(stream);
       setWebcamEnabled(true);
     } catch (err) {
       notifications.show({ title: 'Camera Error', message: String(err), color: 'red' });
     }
-  }, [webcamEnabled, webcamStream, selectedDeviceId, selectedMicId, resume]);
+  }, [webcamEnabled, webcamStream, selectedDeviceId]);
 
-  // Start/stop screen share
+  // Start/stop screen share. Its tab/system audio (if shared) becomes a "Slides" source in the mix.
   const toggleScreen = useCallback(async () => {
     if (screenEnabled && screenStream) {
       screenStream.getTracks().forEach((t) => t.stop());
       setScreenStream(null);
-      setScreenAudioStream(null);
+      if (slideSourceIdRef.current) {
+        removeSource(slideSourceIdRef.current);
+        slideSourceIdRef.current = null;
+      }
       setScreenEnabled(false);
       return;
     }
@@ -175,14 +172,21 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
 
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length > 0) {
-        setScreenAudioStream(new MediaStream(audioTracks));
+        slideSourceIdRef.current = addSource({
+          stream: new MediaStream(audioTracks),
+          label: 'Slide audio',
+          kind: 'slides',
+        });
       }
 
       setScreenEnabled(true);
 
       stream.getVideoTracks()[0]?.addEventListener('ended', () => {
         setScreenStream(null);
-        setScreenAudioStream(null);
+        if (slideSourceIdRef.current) {
+          removeSource(slideSourceIdRef.current);
+          slideSourceIdRef.current = null;
+        }
         setScreenEnabled(false);
       });
     } catch (err) {
@@ -190,7 +194,61 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
         notifications.show({ title: 'Screen Share Error', message: String(err), color: 'red' });
       }
     }
-  }, [screenEnabled, screenStream, resume]);
+  }, [screenEnabled, screenStream, resume, addSource, removeSource]);
+
+  // Add a microphone / input device to the mix. Loopback inputs (Stereo Mix, virtual cables)
+  // show up here too — the browser can't tell them apart from a mic.
+  const handleAddMic = useCallback(async () => {
+    try {
+      resume();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: selectedMicId ? { deviceId: { exact: selectedMicId } } : true,
+      });
+      const track = stream.getAudioTracks()[0];
+      const realId = track?.getSettings().deviceId ?? selectedMicId ?? undefined;
+
+      // Don't capture the same device twice.
+      if (realId && sources.some((s) => s.kind === 'microphone' && s.deviceId === realId)) {
+        stream.getTracks().forEach((t) => t.stop());
+        notifications.show({ title: 'Already added', message: 'That microphone is already in the mix.', color: 'yellow' });
+        return;
+      }
+
+      const label = micDevices.find((d) => d.deviceId === realId)?.label || track?.label || 'Microphone';
+      addSource({ stream, label, kind: 'microphone', deviceId: realId });
+    } catch (err) {
+      notifications.show({ title: 'Microphone Error', message: String(err), color: 'red' });
+    }
+  }, [selectedMicId, micDevices, sources, addSource, resume]);
+
+  // Add desktop / system audio. getDisplayMedia is the only browser door to "what's playing on
+  // this PC", and it always captures a video surface — we keep the audio and discard the picture.
+  const handleAddDesktopAudio = useCallback(async () => {
+    try {
+      resume();
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true,
+      });
+      stream.getVideoTracks().forEach((t) => t.stop());
+
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        notifications.show({
+          title: 'No desktop audio captured',
+          message: 'Pick a screen or tab and tick “Share system/tab audio”.',
+          color: 'yellow',
+        });
+        return;
+      }
+
+      addSource({ stream: new MediaStream(audioTracks), label: 'Desktop audio', kind: 'desktop' });
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        notifications.show({ title: 'Desktop Audio Error', message: String(err), color: 'red' });
+      }
+    }
+  }, [addSource, resume]);
 
   // Studio stream (WebSocket transport)
   const {
@@ -268,6 +326,12 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     }
   }, []);
 
+  // Microphones not already in the mix (avoid offering a device that's been added).
+  const addedMicIds = new Set(
+    sources.filter((s) => s.kind === 'microphone' && s.deviceId).map((s) => s.deviceId as string),
+  );
+  const availableMics = micDevices.filter((d) => !addedMicIds.has(d.deviceId));
+
   return (
     <Stack gap="sm">
       {studioError && (
@@ -331,7 +395,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
         </Group>
       </Card>
 
-      {/* Step 2 — Camera & mic */}
+      {/* Step 2 — Camera */}
       <Card withBorder padding="sm">
         <Group wrap="nowrap" align="flex-start" gap="sm">
           <ThemeIcon
@@ -344,49 +408,24 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
           </ThemeIcon>
           <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
             <Group justify="space-between" wrap="nowrap" gap="xs">
-              <Text size="sm" fw={500}>Camera &amp; microphone</Text>
+              <Text size="sm" fw={500}>Camera</Text>
               <Badge size="sm" color={webcamEnabled ? 'green' : 'gray'} variant="light">
                 {webcamEnabled ? 'Camera on' : 'Off'}
               </Badge>
             </Group>
 
             {!webcamEnabled && (
-              <>
-                <Select
-                  size="xs"
-                  label="Camera"
-                  placeholder="Choose camera..."
-                  data={webcamDevices.map((d) => ({
-                    value: d.deviceId,
-                    label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
-                  }))}
-                  value={selectedDeviceId}
-                  onChange={setSelectedDeviceId}
-                />
-                <Select
-                  size="xs"
-                  label="Microphone"
-                  placeholder="Choose microphone..."
-                  data={micDevices.map((d) => ({
-                    value: d.deviceId,
-                    label: d.label || `Microphone ${d.deviceId.slice(0, 8)}`,
-                  }))}
-                  value={selectedMicId}
-                  onChange={setSelectedMicId}
-                />
-              </>
-            )}
-
-            {webcamEnabled && (
-              <Group gap="xs" wrap="nowrap" align="center">
-                <Text size="xs" c="dimmed" style={{ width: 26 }}>Mic</Text>
-                <Progress
-                  value={audioLevel * 100}
-                  color={audioLevel > 0.8 ? 'red' : 'green'}
-                  size="sm"
-                  style={{ flex: 1 }}
-                />
-              </Group>
+              <Select
+                size="xs"
+                label="Camera"
+                placeholder="Choose camera..."
+                data={webcamDevices.map((d) => ({
+                  value: d.deviceId,
+                  label: d.label || `Camera ${d.deviceId.slice(0, 8)}`,
+                }))}
+                value={selectedDeviceId}
+                onChange={setSelectedDeviceId}
+              />
             )}
 
             <Group gap="xs" mt={2}>
@@ -396,9 +435,107 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
                 variant={webcamEnabled ? 'outline' : 'filled'}
                 onClick={toggleWebcam}
               >
-                {webcamEnabled ? 'Turn off' : 'Turn on camera and microphone'}
+                {webcamEnabled ? 'Turn off camera' : 'Turn on camera'}
               </Button>
             </Group>
+          </Stack>
+        </Group>
+      </Card>
+
+      {/* Step 3 — Audio */}
+      <Card withBorder padding="sm">
+        <Group wrap="nowrap" align="flex-start" gap="sm">
+          <ThemeIcon
+            radius="xl"
+            size="md"
+            color={sources.length > 0 ? 'green' : 'gray'}
+            variant={sources.length > 0 ? 'filled' : 'light'}
+          >
+            {sources.length > 0 ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>3</Text>}
+          </ThemeIcon>
+          <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
+            <Group justify="space-between" wrap="nowrap" gap="xs">
+              <Text size="sm" fw={500}>Audio</Text>
+              <Badge size="sm" color={sources.length > 0 ? 'green' : 'gray'} variant="light">
+                {sources.length > 0 ? `${sources.length} source${sources.length > 1 ? 's' : ''}` : 'No audio'}
+              </Badge>
+            </Group>
+
+            {sources.length === 0 && (
+              <Text size="xs" c="dimmed">
+                Add a microphone so your viewers can hear you. You can also add desktop audio — music,
+                a video, or another app playing on this PC.
+              </Text>
+            )}
+
+            {/* Active sources — each with its own level meter, volume, and mute */}
+            {sources.map((s) => {
+              const level = levels[s.id] ?? 0;
+              const meta = KIND_META[s.kind];
+              return (
+                <Card key={s.id} withBorder padding="xs" radius="sm">
+                  <Group justify="space-between" wrap="nowrap" gap="xs" mb={6}>
+                    <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+                      <Badge size="xs" variant="light" color={meta.color}>{meta.label}</Badge>
+                      <Text size="xs" truncate>{s.label}</Text>
+                    </Group>
+                    <Group gap={4} wrap="nowrap">
+                      <Button
+                        size="compact-xs"
+                        variant={s.muted ? 'filled' : 'subtle'}
+                        color={s.muted ? 'red' : 'gray'}
+                        onClick={() => setMuted(s.id, !s.muted)}
+                      >
+                        {s.muted ? 'Muted' : 'Mute'}
+                      </Button>
+                      <Button size="compact-xs" variant="subtle" color="gray" onClick={() => removeSource(s.id)}>
+                        ✕
+                      </Button>
+                    </Group>
+                  </Group>
+                  <Progress
+                    value={s.muted ? 0 : level * 100}
+                    color={s.muted ? 'gray' : level > 0.8 ? 'red' : 'green'}
+                    size="sm"
+                    mb={6}
+                  />
+                  <Slider
+                    size="xs"
+                    min={0}
+                    max={2}
+                    step={0.1}
+                    value={s.gain}
+                    onChange={(v) => setGain(s.id, v)}
+                    label={(v) => `${Math.round(v * 100)}%`}
+                    disabled={s.muted}
+                  />
+                </Card>
+              );
+            })}
+
+            {/* Add sources */}
+            <Group gap="xs" wrap="nowrap" align="flex-end" mt={2}>
+              <Select
+                size="xs"
+                label="Microphone"
+                placeholder="Default microphone"
+                data={availableMics.map((d) => ({
+                  value: d.deviceId,
+                  label: d.label || `Microphone ${d.deviceId.slice(0, 8)}`,
+                }))}
+                value={selectedMicId}
+                onChange={setSelectedMicId}
+                style={{ flex: 1 }}
+              />
+              <Button size="xs" variant="light" onClick={handleAddMic}>Add mic</Button>
+            </Group>
+            <Button size="xs" variant="light" onClick={handleAddDesktopAudio}>
+              Add desktop audio
+            </Button>
+            <Text size="xs" c="dimmed">
+              Desktop audio: pick a screen or tab in the share dialog and tick “Share system/tab audio”.
+              We only use the sound, not the picture.
+            </Text>
           </Stack>
         </Group>
       </Card>
@@ -441,48 +578,6 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
           )}
         </Stack>
       </Card>
-
-      {/* Advanced — audio levels */}
-      <Box>
-        <Button
-          size="compact-xs"
-          variant="subtle"
-          color="gray"
-          onClick={() => setShowAudio((s) => !s)}
-        >
-          {showAudio ? '▾' : '▸'} Adjust audio levels
-        </Button>
-        <Collapse in={showAudio}>
-          <Card withBorder padding="xs" mt={4}>
-            <Group grow align="center">
-              <Stack gap={2}>
-                <Text size="xs">Mic volume</Text>
-                <Slider
-                  size="xs"
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  value={micGain}
-                  onChange={setMicGain}
-                  label={(v) => `${Math.round(v * 100)}%`}
-                />
-              </Stack>
-              <Stack gap={2}>
-                <Text size="xs">Slide audio</Text>
-                <Slider
-                  size="xs"
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  value={tabGain}
-                  onChange={setTabGain}
-                  label={(v) => `${Math.round(v * 100)}%`}
-                />
-              </Stack>
-            </Group>
-          </Card>
-        </Collapse>
-      </Box>
 
       {/* Advanced — layout editor (rarely needed; hidden by default) */}
       <Box>
