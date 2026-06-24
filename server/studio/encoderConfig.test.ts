@@ -5,10 +5,12 @@ import {
   pickPreset,
   resolveEncoder,
   buildVideoArgs,
+  shouldRuntimeFallback,
   NVENC_PRESETS,
   X264_PRESETS,
   DEFAULT_NVENC_PRESET,
   DEFAULT_X264_PRESET,
+  NVENC_RUNTIME_FAIL_WINDOW_MS,
 } from './encoderConfig.js';
 
 test('the defaults are themselves valid presets', () => {
@@ -153,4 +155,32 @@ test('buildVideoArgs: both encoders pin 30 fps CFR with a 2 s (g=60) keyframe in
     assert.equal(args[args.indexOf('-g') + 1], '60');
     assert.ok(!args.includes('120'));
   }
+});
+
+// --- shouldRuntimeFallback: one-time NVENC→libx264 fallback when a built-in encoder fails at runtime ---
+
+test('NVENC_RUNTIME_FAIL_WINDOW_MS is a sane positive default', () => {
+  assert.ok(NVENC_RUNTIME_FAIL_WINDOW_MS > 0);
+});
+
+test('shouldRuntimeFallback: NVENC dying inside the window triggers a fallback', () => {
+  assert.equal(shouldRuntimeFallback({ encoder: 'h264_nvenc', ranMs: 800, alreadyFellBack: false }), true);
+});
+
+test('shouldRuntimeFallback: NVENC that ran past the window is a transient blip — no fallback', () => {
+  // It clearly worked for a while, so don't permanently downgrade to CPU; let the normal reconnect retry.
+  assert.equal(shouldRuntimeFallback({ encoder: 'h264_nvenc', ranMs: 60_000, alreadyFellBack: false }), false);
+});
+
+test('shouldRuntimeFallback: never fires once we have already fallen back (no loop)', () => {
+  assert.equal(shouldRuntimeFallback({ encoder: 'h264_nvenc', ranMs: 100, alreadyFellBack: true }), false);
+});
+
+test('shouldRuntimeFallback: a libx264 death never triggers a fallback (nothing to fall back to)', () => {
+  assert.equal(shouldRuntimeFallback({ encoder: 'libx264', ranMs: 100, alreadyFellBack: false }), false);
+});
+
+test('shouldRuntimeFallback: the window boundary is exclusive (ranMs === window → transient)', () => {
+  assert.equal(shouldRuntimeFallback({ encoder: 'h264_nvenc', ranMs: 1000, alreadyFellBack: false, windowMs: 1000 }), false);
+  assert.equal(shouldRuntimeFallback({ encoder: 'h264_nvenc', ranMs: 999, alreadyFellBack: false, windowMs: 1000 }), true);
 });

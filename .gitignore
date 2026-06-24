@@ -13,6 +13,11 @@ data/*.db-journal
 data/*.db-shm
 data/*.db-wal
 
+# TLS — the auto-generated self-signed localhost cert/key (regenerated on demand by server/cert.ts).
+# Never commit a private key; point at a real cert via TLS_CERT_FILE / TLS_KEY_FILE instead.
+data/*.key
+data/*.cert
+
 # Uploads (keep directory, ignore files)
 uploads/*
 !uploads/.gitkeep

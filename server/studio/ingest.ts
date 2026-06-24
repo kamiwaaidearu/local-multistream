@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { validateToken } from './auth.js';
 import { isObsConnected } from '../rtmp/server.js';
 import { handleBandwidthProbe } from './bandwidthProbe.js';
-import { resolveEncoder, buildVideoArgs, type VideoEncoder } from './encoderConfig.js';
+import { resolveEncoder, buildVideoArgs, shouldRuntimeFallback, type VideoEncoder } from './encoderConfig.js';
 
 let ffmpegPath: string;
 try {
@@ -53,6 +53,9 @@ function stopIngestFfmpeg(): Promise<void> {
 // include nvenc, or the host may have no NVIDIA driver. Listing the encoders is cheap and avoids
 // spawning a doomed ingest FFmpeg.
 let nvencSupported: boolean | null = null;
+// Set once if an NVENC ingest dies at runtime (built into ffmpeg but not actually usable on this
+// host) — we then drop to libx264 for the rest of the process. One-shot, so the fallback can't loop.
+let nvencRuntimeFailed = false;
 
 function detectNvenc(): boolean {
   if (nvencSupported === null) {
@@ -116,6 +119,7 @@ function startIngestFfmpeg(): ChildProcess {
   ];
 
   console.log(`[studio] Starting ingest FFmpeg → ${rtmpUrl}`);
+  const startedAt = Date.now();
   const child = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
 
   child.stderr?.on('data', (data: Buffer) => {
@@ -130,9 +134,34 @@ function startIngestFfmpeg(): ChildProcess {
 
   child.on('close', (code) => {
     console.log(`[studio] Ingest FFmpeg exited with code ${code}`);
-    if (ingestFfmpeg === child) {
-      ingestFfmpeg = null;
-      studioConnected = false;
+    // Only act if THIS child was still the active ingest. A normal stop (stopIngestFfmpeg /
+    // shutdown) nulls ingestFfmpeg first, so an intentional teardown skips everything below.
+    if (ingestFfmpeg !== child) return;
+    ingestFfmpeg = null;
+    studioConnected = false;
+
+    // NVENC is built into ffmpeg but may not actually work on this host (no driver, no free encode
+    // session, a GPU reset) — which only surfaces as the encoder dying right after spawn. Rule it
+    // out for the rest of the process so the next ingest uses libx264 (CPU). One-shot.
+    const ranMs = Date.now() - startedAt;
+    if (shouldRuntimeFallback({ encoder, ranMs, alreadyFellBack: nvencRuntimeFailed })) {
+      nvencRuntimeFailed = true;
+      nvencSupported = false; // detectNvenc() now returns false without re-probing
+      resolved = null;        // force getEncoder() to re-resolve → libx264
+      console.warn(
+        `[studio] h264_nvenc exited after ${ranMs}ms — it's built into ffmpeg but not usable on ` +
+        'this host. Falling back to libx264 (CPU) for the rest of this session.',
+      );
+    }
+
+    // If the operator is still connected, the ingest died out from under a live session rather than
+    // us stopping it. Bounce the socket so the client reconnects and a fresh ingest starts (on
+    // libx264 if we just fell back) — otherwise its webm chunks are silently dropped and the
+    // broadcast goes dead with no recovery. The client reconnects with backoff and gives up after a
+    // few tries, so this can't loop forever; 4003 ≠ the fatal 4000/4001 codes, so it does reconnect.
+    if (activeWs) {
+      console.warn('[studio] Ingest FFmpeg died while the studio was connected — bouncing the socket to restart ingest');
+      try { activeWs.close(4003, 'Ingest restarting'); } catch { /* ignore */ }
     }
   });
 

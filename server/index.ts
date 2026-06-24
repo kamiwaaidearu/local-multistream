@@ -73,15 +73,22 @@ async function start(): Promise<void> {
   const { startRtmpServer } = await import('./rtmp/server.js');
   startRtmpServer();
 
-  const httpServer = app.listen(config.port, () => {
-    console.log(`[server] Local Multistream running at http://localhost:${config.port}`);
+  // BIND_HOST empty → bind all interfaces (omit host); '127.0.0.1' → local-only (the hardened
+  // Cloudflare-tunnel default). Passing host: undefined to listen() binds all interfaces.
+  const host = config.bindHost || undefined;
+  const shownHost = host ?? 'localhost';
+
+  const httpServer = app.listen({ port: config.port, host }, () => {
+    console.log(`[server] Local Multistream running at http://${shownHost}:${config.port}`);
   });
 
   // Start HTTPS server for platforms that require SSL redirect URIs (e.g. Facebook)
   const cert = await getOrCreateCert();
-  const httpsServer = https.createServer({ key: cert.private, cert: cert.cert }, app).listen(config.httpsPort, () => {
-    console.log(`[server] HTTPS server running at https://localhost:${config.httpsPort}`);
-  });
+  const httpsServer = https
+    .createServer({ key: cert.private, cert: cert.cert }, app)
+    .listen({ port: config.httpsPort, host }, () => {
+      console.log(`[server] HTTPS server running at https://${shownHost}:${config.httpsPort}`);
+    });
 
   // Initialize studio WebSocket on both servers
   const { initStudioWebSocket } = await import('./studio/ingest.js');

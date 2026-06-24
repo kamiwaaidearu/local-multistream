@@ -14,6 +14,12 @@ export type EncoderMode = typeof ENCODER_MODES[number];
 export const DEFAULT_NVENC_PRESET = 'p5';
 export const DEFAULT_X264_PRESET = 'veryfast';
 
+// How long an NVENC ingest must survive before its exit is treated as a transient blip rather than
+// "NVENC isn't actually usable on this host". A genuine NVENC-init failure (no driver, no free
+// encode session, a GPU reset) exits within a second or two of spawn — before it has encoded real
+// frames — whereas a process that ran longer was working. See shouldRuntimeFallback + ingest.ts.
+export const NVENC_RUNTIME_FAIL_WINDOW_MS = 15_000;
+
 // Valid presets per encoder (from `ffmpeg -h encoder=h264_nvenc` / libx264's documented set). An
 // unknown value — a typo, or a preset this build doesn't ship — falls back to the default rather
 // than failing the ingest: a config typo must never break streaming.
@@ -38,6 +44,22 @@ export function selectEncoder(mode: EncoderMode, nvencSupported: boolean): Encod
   if (mode === 'libx264') return { encoder: 'libx264', forcedNvencUnavailable: false };
   if (nvencSupported) return { encoder: 'h264_nvenc', forcedNvencUnavailable: false };
   return { encoder: 'libx264', forcedNvencUnavailable: mode === 'nvenc' };
+}
+
+// Should an unexpected ingest-FFmpeg exit trigger a one-time fallback off NVENC onto libx264?
+// `ffmpeg -encoders` only tells us NVENC is *built in*, not that it actually works on this host —
+// the driver may be missing, every encode session may be in use, or the GPU may have reset. Those
+// only surface when a real encode is attempted, and they kill the process almost immediately. So
+// when an NVENC ingest dies inside the fail window and we haven't already fallen back, treat NVENC
+// as unusable for the rest of the run. Pure, so the decision is unit-testable.
+export function shouldRuntimeFallback(args: {
+  encoder: VideoEncoder;
+  ranMs: number;
+  alreadyFellBack: boolean;
+  windowMs?: number;
+}): boolean {
+  const windowMs = args.windowMs ?? NVENC_RUNTIME_FAIL_WINDOW_MS;
+  return args.encoder === 'h264_nvenc' && !args.alreadyFellBack && args.ranMs < windowMs;
 }
 
 export interface PresetChoice {

@@ -50,6 +50,12 @@ export const config = Object.freeze({
   // proxy's address. Enabling it without a proxy would let clients spoof their IP. Accepts 'true',
   // a hop count (e.g. '1'), or a subnet/IP; 'false'/'off'/'0'/empty disable it.
   trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
+  // Network interface the HTTP/HTTPS servers bind to. Empty = all interfaces (reachable on the
+  // machine's LAN IP). Set to '127.0.0.1' behind a Cloudflare Tunnel so the origin accepts only
+  // local connections — cloudflared reaches it on localhost and remote admins come in through the
+  // tunnel hostname, while nothing on the LAN can hit it directly to spoof CF-Connecting-IP (see
+  // TRUST_PROXY). RTMP binds separately (node-media-server) and is unaffected.
+  bindHost: (process.env.BIND_HOST ?? '').trim(),
   // Web Studio re-encode quality (kbps). Tunable for your upload bandwidth — note the
   // server fans this out to EACH platform, so total upload ≈ videoBitrate × (# platforms).
   studioVideoBitrateKbps: envInt('STUDIO_VIDEO_BITRATE', 4500),
