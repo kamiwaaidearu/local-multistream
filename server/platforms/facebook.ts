@@ -62,37 +62,33 @@ export async function createFacebookLiveVideo(
 }
 
 /**
- * Resolve the public, shareable URL for a live video. CRITICAL: the id returned by /live_videos
- * (which we store as broadcast_id) is the *live-video* object id — NOT the id used in the public
- * /{page}/videos/{id} permalink, which is the underlying *video* object's id (a different number).
- * Linking to /videos/{live_video_id} yields "This content isn't available right now".
+ * Resolve the underlying *video* object id for a live video. CRITICAL: the id returned by
+ * /live_videos (which we store as broadcast_id) is the *live-video* object id — NOT the id used in
+ * the public /{page}/videos/{id} permalink, which is the underlying *video* object's id (a
+ * different number). Linking with the live-video id yields "This content isn't available right
+ * now". We read the live-video node's video{id} (falling back to parsing the id out of
+ * permalink_url) to get the real id, so the caller can build a /{page}/videos/{id} link that
+ * actually works. Returns null if it can't be resolved — the caller should then fall back.
  *
- * So we ask the live-video node for its real link: permalink_url (already a /{page}/videos/{id}/
- * path), falling back to video{id}. Returns an absolute facebook.com URL, or null if it can't be
- * resolved — in which case the caller should fall back to a best-effort URL.
+ * Confirmed against the live Graph API: GET /{live_video_id}?fields=video{id},permalink_url returns
+ * the real video id, and that /{page}/videos/{id} URL loads the published video.
  */
-export async function resolveFacebookVideoUrl(liveVideoId: string): Promise<string | null> {
-  const { accessToken, pageId } = getPageAuth();
+export async function resolveFacebookVideoId(liveVideoId: string): Promise<string | null> {
+  const { accessToken } = getPageAuth();
 
-  const params = new URLSearchParams({ fields: 'permalink_url,video{id}', access_token: accessToken });
+  const params = new URLSearchParams({ fields: 'video{id},permalink_url', access_token: accessToken });
   const res = await fetch(`${API}/${liveVideoId}?${params}`);
   if (!res.ok) {
-    console.warn(`[facebook] Could not resolve video URL for live video ${liveVideoId}: ${await errorMessage(res)}`);
+    console.warn(`[facebook] Could not resolve video id for live video ${liveVideoId}: ${await errorMessage(res)}`);
     return null;
   }
 
-  const data = await res.json() as { permalink_url?: string; video?: { id?: string } };
+  const data = await res.json() as { video?: { id?: string }; permalink_url?: string };
 
-  if (data.permalink_url) {
-    // permalink_url is a site-relative path like "/rosarymen/videos/1873954543276237/".
-    return data.permalink_url.startsWith('http')
-      ? data.permalink_url
-      : `https://www.facebook.com${data.permalink_url}`;
-  }
-  if (data.video?.id) {
-    return `https://www.facebook.com/${pageId}/videos/${data.video.id}`;
-  }
-  return null;
+  if (data.video?.id) return data.video.id;
+  // permalink_url is a path like "/rosarymen/videos/1873954543276237/" — pull the id out.
+  const match = data.permalink_url?.match(/\/videos\/(\d+)/);
+  return match ? match[1] : null;
 }
 
 /**
