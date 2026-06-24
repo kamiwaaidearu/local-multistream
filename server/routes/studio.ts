@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { isStudioConnected } from '../studio/ingest.js';
 import { isObsConnected } from '../rtmp/server.js';
 import { getDb, DEFAULT_GRID_TEMPLATE } from '../db/index.js';
+import { config } from '../config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +34,12 @@ studioRouter.get('/status', (_req: Request, res: Response) => {
   else if (obs) source = 'obs';
 
   res.json({ connected: studio || obs, source });
+});
+
+// RTMP ingest details for the OBS panel — sourced from server config (RTMP_PORT / LOCAL_STREAM_KEY)
+// so the UI always shows the real key/port and never drifts if the operator changes the stream key.
+studioRouter.get('/ingest-info', (_req: Request, res: Response) => {
+  res.json({ port: config.rtmpPort, streamKey: config.localStreamKey });
 });
 
 // --- Template CRUD (v1: single template) ---

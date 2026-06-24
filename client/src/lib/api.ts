@@ -120,6 +120,8 @@ export const api = {
 
   // Studio
   getStudioStatus: () => request<{ connected: boolean; source: string | null }>('/api/studio/status'),
+  // RTMP ingest details for the OBS panel (real RTMP_PORT / LOCAL_STREAM_KEY from server config).
+  getIngestInfo: () => request<{ port: number; streamKey: string }>('/api/studio/ingest-info'),
   getTemplate: () => request<{ config_json: Record<string, unknown>; id: string; name: string }>('/api/studio/template'),
   updateTemplate: (id: string, data: { name?: string; config_json?: unknown }) =>
     request<unknown>(`/api/studio/template/${id}`, {
