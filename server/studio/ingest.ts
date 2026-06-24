@@ -1,10 +1,11 @@
 import { Server as HttpServer, IncomingMessage } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, spawnSync, ChildProcess } from 'child_process';
 import { config } from '../config.js';
 import { validateToken } from './auth.js';
 import { isObsConnected } from '../rtmp/server.js';
 import { handleBandwidthProbe } from './bandwidthProbe.js';
+import { resolveEncoder, buildVideoArgs, type VideoEncoder } from './encoderConfig.js';
 
 let ffmpegPath: string;
 try {
@@ -48,25 +49,65 @@ function stopIngestFfmpeg(): Promise<void> {
   });
 }
 
+// h264_nvenc availability is probed once and cached: the bundled ffmpeg-static build may not
+// include nvenc, or the host may have no NVIDIA driver. Listing the encoders is cheap and avoids
+// spawning a doomed ingest FFmpeg.
+let nvencSupported: boolean | null = null;
+
+function detectNvenc(): boolean {
+  if (nvencSupported === null) {
+    try {
+      const res = spawnSync(ffmpegPath, ['-hide_banner', '-encoders'], {
+        encoding: 'utf8',
+        timeout: 10000,
+      });
+      // Trust the encoder list only on a clean exit: !res.error rules out a spawn failure or the
+      // 10s timeout (status is null on a signal kill), and status === 0 rules out a crash that
+      // printed partial output. Any doubt → false → safe libx264 fallback.
+      nvencSupported = !res.error && res.status === 0 && (res.stdout ?? '').includes('h264_nvenc');
+    } catch {
+      nvencSupported = false;
+    }
+  }
+  return nvencSupported;
+}
+
+// The encoder and its preset are resolved once (and logged), then cached. The pure decision logic
+// lives in encoderConfig.ts (unit-tested); here we just wire it to the real config, the NVENC
+// probe, and the warnings/log. NVENC ALWAYS falls back to libx264 when unsupported so Web Studio
+// streaming never breaks.
+interface ResolvedEncoder {
+  encoder: VideoEncoder;
+  preset: string;
+}
+let resolved: ResolvedEncoder | null = null;
+
+function getEncoder(): ResolvedEncoder {
+  if (resolved) return resolved;
+
+  const { encoder, preset, warnings } = resolveEncoder({
+    mode: config.studioVideoEncoder,
+    nvencSupported: detectNvenc(),
+    nvencPreset: config.studioNvencPreset,
+    x264Preset: config.studioX264Preset,
+  });
+  for (const warning of warnings) console.warn(`[studio] ${warning}`);
+  console.log(`[studio] Ingest encoder: ${encoder === 'h264_nvenc' ? 'h264_nvenc (GPU)' : 'libx264 (CPU)'}, preset ${preset}`);
+
+  resolved = { encoder, preset };
+  return resolved;
+}
+
 function startIngestFfmpeg(): ChildProcess {
   const rtmpUrl = `rtmp://127.0.0.1:${config.rtmpPort}/live/${config.localStreamKey}`;
 
-  const vb = `${config.studioVideoBitrateKbps}k`;
+  const { encoder, preset } = getEncoder();
   const args = [
     '-f', 'webm',
     '-analyzeduration', '1000000',
     '-probesize', '1000000',
     '-i', 'pipe:0',
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-profile:v', 'high',
-    '-pix_fmt', 'yuv420p',
-    // Constant bitrate so the encoder actually spends the budget (sharp image) rather than
-    // undershooting on low-motion slides. Dropped -tune zerolatency — it disabled b-frames
-    // and lookahead, which hurt quality; a second or two of extra latency is fine for a
-    // one-way broadcast.
-    '-b:v', vb, '-minrate', vb, '-maxrate', vb, '-bufsize', `${config.studioVideoBitrateKbps * 2}k`,
-    '-g', '120',
+    ...buildVideoArgs(encoder, preset, config.studioVideoBitrateKbps),
     '-c:a', 'aac',
     '-b:a', `${config.studioAudioBitrateKbps}k`,
     '-ar', '48000',
@@ -193,6 +234,10 @@ export function initStudioWebSocket(...servers: HttpServer[]): void {
   }
 
   console.log('[studio] WebSocket server initialized on /ws/studio and /ws/bandwidth');
+
+  // Probe + log the ingest encoder and preset now (at startup) so the choice is visible before the
+  // first studio connects; the result is cached and reused by every ingest.
+  getEncoder();
 }
 
 /**

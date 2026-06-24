@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { DEFAULT_NVENC_PRESET, DEFAULT_X264_PRESET, ENCODER_MODES } from './studio/encoderConfig.js';
 
 function env(key: string, fallback?: string): string {
   const value = process.env[key] ?? fallback;
@@ -25,6 +26,17 @@ function parseTrustProxy(raw: string | undefined): boolean | number | string | n
   return v; // subnet / IP list
 }
 
+function envEnum<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const value = raw.trim().toLowerCase();
+  const match = allowed.find((a) => a === value);
+  if (!match) {
+    throw new Error(`Invalid ${key}: "${raw}" (expected one of: ${allowed.join(', ')})`);
+  }
+  return match;
+}
+
 export const config = Object.freeze({
   port: envInt('PORT', 3000),
   httpsPort: envInt('HTTPS_PORT', 3443),
@@ -42,6 +54,18 @@ export const config = Object.freeze({
   // server fans this out to EACH platform, so total upload ≈ videoBitrate × (# platforms).
   studioVideoBitrateKbps: envInt('STUDIO_VIDEO_BITRATE', 4500),
   studioAudioBitrateKbps: envInt('STUDIO_AUDIO_BITRATE', 160),
+  // Web Studio ingest video encoder:
+  //   auto    — use NVIDIA NVENC (h264_nvenc) when this ffmpeg build supports it, else libx264 (CPU)
+  //   nvenc   — prefer NVENC; still falls back to libx264 if it's unavailable, so streaming never breaks
+  //   libx264 — always encode on the CPU
+  studioVideoEncoder: envEnum('STUDIO_VIDEO_ENCODER', ENCODER_MODES, 'auto'),
+  // Encode preset (speed↔quality) for whichever ingest encoder is active. Defaults are sensible;
+  // override only to trade encode load for quality. An unknown value falls back to the default
+  // (logged) so a typo never breaks streaming.
+  //   STUDIO_NVENC_PRESET — NVENC: p1 (fastest) … p7 (best), or named (hq, ll, …). Default p5.
+  //   STUDIO_X264_PRESET  — libx264: ultrafast … veryslow/placebo. Default veryfast.
+  studioNvencPreset: env('STUDIO_NVENC_PRESET', DEFAULT_NVENC_PRESET),
+  studioX264Preset: env('STUDIO_X264_PRESET', DEFAULT_X264_PRESET),
 
   youtube: {
     clientId: process.env.YT_CLIENT_ID ?? '',
