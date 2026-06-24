@@ -62,6 +62,40 @@ export async function createFacebookLiveVideo(
 }
 
 /**
+ * Resolve the public, shareable URL for a live video. CRITICAL: the id returned by /live_videos
+ * (which we store as broadcast_id) is the *live-video* object id — NOT the id used in the public
+ * /{page}/videos/{id} permalink, which is the underlying *video* object's id (a different number).
+ * Linking to /videos/{live_video_id} yields "This content isn't available right now".
+ *
+ * So we ask the live-video node for its real link: permalink_url (already a /{page}/videos/{id}/
+ * path), falling back to video{id}. Returns an absolute facebook.com URL, or null if it can't be
+ * resolved — in which case the caller should fall back to a best-effort URL.
+ */
+export async function resolveFacebookVideoUrl(liveVideoId: string): Promise<string | null> {
+  const { accessToken, pageId } = getPageAuth();
+
+  const params = new URLSearchParams({ fields: 'permalink_url,video{id}', access_token: accessToken });
+  const res = await fetch(`${API}/${liveVideoId}?${params}`);
+  if (!res.ok) {
+    console.warn(`[facebook] Could not resolve video URL for live video ${liveVideoId}: ${await errorMessage(res)}`);
+    return null;
+  }
+
+  const data = await res.json() as { permalink_url?: string; video?: { id?: string } };
+
+  if (data.permalink_url) {
+    // permalink_url is a site-relative path like "/rosarymen/videos/1873954543276237/".
+    return data.permalink_url.startsWith('http')
+      ? data.permalink_url
+      : `https://www.facebook.com${data.permalink_url}`;
+  }
+  if (data.video?.id) {
+    return `https://www.facebook.com/${pageId}/videos/${data.video.id}`;
+  }
+  return null;
+}
+
+/**
  * Take a Facebook live video live. Per the Live Video API, an UNPUBLISHED video is "not visible
  * to other users" until it's transitioned to LIVE_NOW via POST /{live-video-id}. The transition
  * only succeeds once the stream URL is

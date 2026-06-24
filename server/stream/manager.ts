@@ -4,7 +4,7 @@ import { getYouTubeAuth } from '../auth/youtube.js';
 import { getFacebookPageToken, getFacebookPageUrl } from '../auth/facebook.js';
 import { getTwitchCredentials } from '../auth/twitch.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
-import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost } from '../platforms/facebook.js';
+import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, resolveFacebookVideoUrl } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
 import { getReminderSettings, computeReminderTime, renderReminder } from './reminders.js';
 import type { Stream, PlatformStream, Platform } from '../types.js';
@@ -16,7 +16,12 @@ function logEvent(streamId: string | null, platform: string | null, event: strin
   );
 }
 
-/** Public URL for a Facebook live video / VOD: {page}/videos/{id} when the Page URL is known. */
+/**
+ * Best-effort fallback URL for a Facebook live video / VOD, used only when resolveFacebookVideoUrl
+ * can't reach the Graph API. NOTE: `videoId` here is the live-video id, which does NOT match the
+ * public /videos/{id} permalink (that uses the underlying video id) — so this can be a dead link.
+ * Prefer resolveFacebookVideoUrl, which returns the real permalink.
+ */
 function facebookVideoUrl(pageUrl: string | null, videoId: string): string {
   return pageUrl ? `${pageUrl}/videos/${videoId}` : `https://www.facebook.com/watch/live/?v=${videoId}`;
 }
@@ -114,7 +119,9 @@ async function postGoLiveAnnouncement(stream: Stream, broadcastId: string): Prom
 
   const fbPageUrl = await getFacebookPageUrl();
   const pageUrl = fbPageUrl ?? settings.site;
-  const videoUrl = facebookVideoUrl(fbPageUrl, broadcastId);
+  // broadcastId is the live-video id, which is NOT the id in the public /videos/{id} permalink —
+  // ask Facebook for the real link, falling back to a best-effort URL if that lookup fails.
+  const videoUrl = (await resolveFacebookVideoUrl(broadcastId)) ?? facebookVideoUrl(fbPageUrl, broadcastId);
 
   try {
     const postId = await createPagePost(renderReminder(settings.goLivePost.template, stream, settings, pageUrl, videoUrl));
@@ -400,7 +407,8 @@ export async function endStream(streamId: string): Promise<void> {
     try {
       await endFacebookLiveVideo(fbPs.broadcast_id);
       const extra = fbPs.extra_json ? JSON.parse(fbPs.extra_json) : {};
-      extra.vod_url = facebookVideoUrl(await getFacebookPageUrl(), fbPs.broadcast_id);
+      // Use the real /videos/ permalink, not one built from the live-video id (see resolveFacebookVideoUrl).
+      extra.vod_url = (await resolveFacebookVideoUrl(fbPs.broadcast_id)) ?? facebookVideoUrl(await getFacebookPageUrl(), fbPs.broadcast_id);
       db.prepare("UPDATE platform_streams SET status = 'ended', extra_json = ? WHERE id = ?").run(JSON.stringify(extra), fbPs.id);
       logEvent(streamId, 'facebook', 'live_ended');
     } catch (err) {
