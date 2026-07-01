@@ -35,9 +35,15 @@ interface StudioSourcePanelProps {
   onStatusChange: (status: StudioStatus) => void;
   onConnectRef?: React.MutableRefObject<(() => void) | null>;
   onDisconnectRef?: React.MutableRefObject<(() => void) | null>;
+  /**
+   * When true, run the bandwidth test once on mount to pre-select a stream quality the operator's
+   * connection can sustain. The parent passes this only while the stream is "ready" — never while
+   * live, because the probe saturates the uplink for several seconds and would disrupt a broadcast.
+   */
+  autoTestConnection?: boolean;
 }
 
-export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef }: StudioSourcePanelProps) {
+export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection }: StudioSourcePanelProps) {
   const [template, setTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
   const [savedTemplate, setSavedTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
 
@@ -54,8 +60,9 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   // Advanced sections (hidden by default to keep the operator view simple)
   const [showLayout, setShowLayout] = useState(false);
 
-  // Stream quality (Leg-1 / browser encode bitrate). Defaults to Medium; "Test my connection"
-  // measures the operator's upload and pre-selects a preset their link should sustain.
+  // Stream quality (Leg-1 / browser encode bitrate). Defaults to Medium; the bandwidth test —
+  // run automatically on arrival, or again via "Test my connection" — measures the operator's
+  // upload and pre-selects a preset their link should sustain.
   const [quality, setQuality] = useState<QualityKey>('medium');
   const [probing, setProbing] = useState(false);
   const [probeMbps, setProbeMbps] = useState<number | null>(null);
@@ -271,7 +278,10 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   const live = studioStatus === 'connected' || studioStatus === 'connecting';
 
   // Measure upload bandwidth to the server and pre-select a quality the connection can sustain.
-  const handleTestConnection = useCallback(async () => {
+  // `silent` is used by the auto-run on arrival: it sets the default quietly (the inline "Measured
+  // upload …" line still shows the result) and swallows failures, since a red toast on every page
+  // load would be jarring — the operator can retry explicitly with the button to see any error.
+  const handleTestConnection = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     setProbing(true);
     setProbeMbps(null);
     setRecommendedQuality(null);
@@ -281,17 +291,48 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
       const rec = recommendQuality(mbps);
       setQuality(rec);
       setRecommendedQuality(rec);
-      notifications.show({
-        title: 'Connection test complete',
-        message: `Upload ~${mbps.toFixed(1)} Mbps → recommended ${QUALITY_PRESETS[rec].label}`,
-        color: 'green',
-      });
+      if (!silent) {
+        notifications.show({
+          title: 'Connection test complete',
+          message: `Upload ~${mbps.toFixed(1)} Mbps → recommended ${QUALITY_PRESETS[rec].label}`,
+          color: 'green',
+        });
+      }
     } catch (err) {
-      notifications.show({ title: 'Connection test failed', message: String(err), color: 'red' });
+      if (!silent) {
+        notifications.show({ title: 'Connection test failed', message: String(err), color: 'red' });
+      }
     } finally {
       setProbing(false);
     }
   }, []);
+
+  // Auto-run the test once on arrival so the quality selector defaults to something the operator's
+  // connection can actually carry — no need to remember to click "Test my connection". Gated on
+  // `autoTestConnection` (the parent only enables it while the stream is "ready", never live).
+  //
+  // We wait for the page to go idle before probing: the probe saturates the uplink for several
+  // seconds, so firing it during the initial render/data-fetch burst would make other requests
+  // queue behind it. requestIdleCallback (timeout-bounded so it still runs promptly on a busy page)
+  // lets first paint and the initial fetches land first. The ref keeps it to one run; the cleanup
+  // cancels a still-pending probe if the operator leaves — or goes live — before it fires.
+  const autoTestedRef = useRef(false);
+  useEffect(() => {
+    if (autoTestedRef.current || !autoTestConnection) return;
+
+    const run = () => {
+      if (autoTestedRef.current) return;
+      autoTestedRef.current = true;
+      handleTestConnection({ silent: true });
+    };
+
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(run, { timeout: 2000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const id = window.setTimeout(run, 500);
+    return () => window.clearTimeout(id);
+  }, [autoTestConnection, handleTestConnection]);
 
   // Expose connect/disconnect to parent via refs
   useEffect(() => {
@@ -548,7 +589,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
             <Button
               size="compact-xs"
               variant="light"
-              onClick={handleTestConnection}
+              onClick={() => handleTestConnection()}
               loading={probing}
               disabled={live}
             >
