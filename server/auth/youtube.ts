@@ -87,6 +87,22 @@ export function getYouTubeAuth(): ReturnType<typeof createOAuth2Client> | null {
   return oauth2Client;
 }
 
+/**
+ * Verify YouTube auth is usable by forcing a token refresh. Returns false if no account is
+ * connected or the refresh token is dead (invalid_grant) — the exact failure that silently sinks
+ * a go-live transition.
+ */
+export async function validateYouTubeAuth(): Promise<boolean> {
+  const auth = getYouTubeAuth();
+  if (!auth) return false;
+  try {
+    const { token } = await auth.getAccessToken();
+    return !!token;
+  } catch {
+    return false;
+  }
+}
+
 export function disconnectYouTube(): void {
   const db = getDb();
   db.prepare('DELETE FROM credentials WHERE platform = ?').run('youtube');

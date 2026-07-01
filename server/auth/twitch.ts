@@ -195,6 +195,14 @@ export function getTwitchChannelInfo(): { id: string; login: string; displayName
   };
 }
 
+/**
+ * Verify Twitch auth is usable. refreshTwitchToken() renews when near expiry and returns null when
+ * there's no usable refresh token, so a null result means the connection needs re-authing.
+ */
+export async function validateTwitchAuth(): Promise<boolean> {
+  return (await refreshTwitchToken()) !== null;
+}
+
 export function disconnectTwitch(): void {
   const db = getDb();
   db.prepare('DELETE FROM credentials WHERE platform = ?').run('twitch');

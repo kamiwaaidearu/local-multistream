@@ -85,6 +85,12 @@ export const api = {
     request<unknown>(`/api/streams/${id}/setup/${platform}`, { method: 'POST' }),
   goLive: (id: string) => request<unknown>(`/api/streams/${id}/go-live`, { method: 'POST' }),
   endStream: (id: string) => request<unknown>(`/api/streams/${id}/end`, { method: 'POST' }),
+  // Per-platform auth health (go-live pre-check + live reconnect controls).
+  getAuthHealth: () =>
+    request<Record<string, { connected: boolean; ok: boolean }>>('/api/auth/health'),
+  // Retry one platform mid-broadcast after reconnecting its auth (leaves the stream live).
+  retryPlatformLive: (id: string, platform: string) =>
+    request<unknown>(`/api/streams/${id}/live/${platform}/retry`, { method: 'POST' }),
 
   // Auth
   getAuthStatus: () =>

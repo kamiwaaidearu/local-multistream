@@ -174,6 +174,26 @@ export function getSelectedFacebookPage(): { id: string; name: string } | null {
   return { id: extra.page_id, name: extra.page_name ?? extra.page_id };
 }
 
+/**
+ * Verify the stored Facebook Page token is still valid via debug_token. Returns false if no Page
+ * is connected or Facebook reports the token invalid (revoked, expired, password change, etc.).
+ */
+export async function validateFacebookAuth(): Promise<boolean> {
+  const tok = getFacebookPageToken();
+  if (!tok) return false;
+  try {
+    const appToken = `${config.facebook.appId}|${config.facebook.appSecret}`;
+    const res = await fetch(
+      `https://graph.facebook.com/${config.fbApiVersion}/debug_token?input_token=${encodeURIComponent(tok.accessToken)}&access_token=${encodeURIComponent(appToken)}`,
+    );
+    if (!res.ok) return false;
+    const body = await res.json() as { data?: { is_valid?: boolean } };
+    return body.data?.is_valid === true;
+  } catch {
+    return false;
+  }
+}
+
 export function disconnectFacebook(): void {
   const db = getDb();
   db.prepare('DELETE FROM credentials WHERE platform = ?').run('facebook');

@@ -178,6 +178,22 @@ export function startFanOut(streamId: string, platformStreams: PlatformStream[])
 }
 
 /**
+ * Ensure a single platform's fan-out leg is running, restarting it if it has died or given up.
+ * No-op if the leg is already active. Used by mid-stream recovery to bring one platform's video
+ * pipe back without disturbing the others.
+ */
+export function ensurePlatformLeg(streamId: string, ps: PlatformStream): void {
+  const key = `${streamId}:${ps.platform}`;
+  if (activeProcesses.has(key)) return;
+  if (ps.rtmp_url || ps.stream_key) spawnFfmpeg(streamId, ps, 0);
+}
+
+/** True if this platform's fan-out leg is currently running. */
+export function isLegActive(streamId: string, platform: string): boolean {
+  return activeProcesses.has(`${streamId}:${platform}`);
+}
+
+/**
  * Stop all FFmpeg processes for a stream.
  */
 export async function stopFanOut(streamId: string): Promise<void> {

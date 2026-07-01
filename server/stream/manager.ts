@@ -1,8 +1,8 @@
 import { nanoid } from 'nanoid';
 import { getDb } from '../db/index.js';
-import { getYouTubeAuth } from '../auth/youtube.js';
-import { getFacebookPageToken, getFacebookPageUrl } from '../auth/facebook.js';
-import { getTwitchCredentials } from '../auth/twitch.js';
+import { getYouTubeAuth, validateYouTubeAuth } from '../auth/youtube.js';
+import { getFacebookPageToken, getFacebookPageUrl, validateFacebookAuth } from '../auth/facebook.js';
+import { getTwitchCredentials, validateTwitchAuth } from '../auth/twitch.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
 import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, resolveFacebookVideoId } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
@@ -139,6 +139,81 @@ function getEnabledPlatforms(): Platform[] {
   if (getFacebookPageToken()) platforms.push('facebook');
   if (getTwitchCredentials()) platforms.push('twitch');
   return platforms;
+}
+
+export interface PlatformAuthHealth { connected: boolean; ok: boolean; }
+
+/**
+ * Per-platform auth health for every connected platform — powers the go-live pre-check and the
+ * live "reconnect" controls. `ok` means the token actually works right now (real refresh /
+ * debug_token probe), so an expired YouTube login shows up here instead of silently failing the
+ * transition mid-broadcast.
+ */
+export async function getPlatformAuthHealth(): Promise<Record<Platform, PlatformAuthHealth>> {
+  const ytConnected = !!getYouTubeAuth();
+  const fbConnected = !!getFacebookPageToken();
+  const twConnected = !!getTwitchCredentials();
+  const [yt, fb, tw] = await Promise.all([
+    ytConnected ? validateYouTubeAuth() : Promise.resolve(false),
+    fbConnected ? validateFacebookAuth() : Promise.resolve(false),
+    twConnected ? validateTwitchAuth() : Promise.resolve(false),
+  ]);
+  return {
+    youtube: { connected: ytConnected, ok: yt },
+    facebook: { connected: fbConnected, ok: fb },
+    twitch: { connected: twConnected, ok: tw },
+  };
+}
+
+/**
+ * Retry bringing a single platform live mid-broadcast — e.g. after reconnecting YouTube whose token
+ * had expired. Never changes the overall stream status and never touches the other platforms' legs:
+ * it (re)starts only this platform's fan-out leg if it died, then re-runs the control-plane
+ * transition/publish with the current (possibly just-refreshed) credentials.
+ */
+export async function retryPlatformLive(streamId: string, platform: Platform): Promise<void> {
+  const db = getDb();
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId) as Stream | undefined;
+  if (!stream) throw new Error('Stream not found');
+  if (stream.status !== 'live') throw new Error('Stream is not live');
+
+  const ps = db.prepare('SELECT * FROM platform_streams WHERE stream_id = ? AND platform = ?')
+    .get(streamId, platform) as PlatformStream | undefined;
+  if (!ps) throw new Error(`${platform} is not set up for this stream`);
+
+  const { ensurePlatformLeg } = await import('../fanout/ffmpeg.js');
+
+  if (platform === 'youtube') {
+    if (!ps.broadcast_id) throw new Error('YouTube broadcast was never created — set it up first');
+    ensurePlatformLeg(streamId, ps); // restart the video pipe only if it died; no-op if still running
+    const extra = ps.extra_json ? JSON.parse(ps.extra_json) : {};
+    await transitionToLive(ps.broadcast_id, extra.stream_id);
+    db.prepare("UPDATE platform_streams SET status = 'live', error_message = NULL WHERE id = ?").run(ps.id);
+    logEvent(streamId, 'youtube', 'retried_live', `Broadcast ${ps.broadcast_id} transitioned`);
+  } else if (platform === 'facebook') {
+    // Create the live video now if it was deferred or a prior attempt failed.
+    if (!ps.broadcast_id) {
+      const fb = await createFacebookLiveVideo(stream.name, stream.description);
+      db.prepare('UPDATE platform_streams SET broadcast_id = ?, rtmp_url = ? WHERE id = ?')
+        .run(fb.liveVideoId, fb.streamUrl, ps.id);
+      ps.broadcast_id = fb.liveVideoId;
+      ps.rtmp_url = fb.streamUrl;
+      logEvent(streamId, 'facebook', 'setup_success', `Live video ${fb.liveVideoId} created on retry`);
+    }
+    ensurePlatformLeg(streamId, ps);
+    // Facebook only accepts LIVE_NOW once it's receiving the encoder's data — give a freshly
+    // (re)started leg a moment to connect before publishing.
+    await new Promise((r) => setTimeout(r, 3000));
+    await publishFacebookLiveVideo(ps.broadcast_id);
+    db.prepare("UPDATE platform_streams SET status = 'live', error_message = NULL WHERE id = ?").run(ps.id);
+    logEvent(streamId, 'facebook', 'retried_live', `Live video ${ps.broadcast_id} published`);
+  } else {
+    // Twitch goes live automatically once RTMP flows; just ensure the leg is up and (re)set title.
+    ensurePlatformLeg(streamId, ps);
+    await updateTwitchChannel(stream.name);
+    db.prepare("UPDATE platform_streams SET status = 'live', error_message = NULL WHERE id = ?").run(ps.id);
+    logEvent(streamId, 'twitch', 'retried_live', 'Leg ensured; title set');
+  }
 }
 
 /**

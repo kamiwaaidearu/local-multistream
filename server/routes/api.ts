@@ -323,6 +323,24 @@ apiRouter.put('/settings/reminders', (req: Request, res: Response) => {
   res.json(body);
 });
 
+// Per-platform auth health — go-live pre-check and the live "reconnect" controls both read this.
+apiRouter.get('/auth/health', async (_req: Request, res: Response) => {
+  const { getPlatformAuthHealth } = await import('../stream/manager.js');
+  res.json(await getPlatformAuthHealth());
+});
+
+// Retry a single platform mid-broadcast (after reconnecting its auth). Leaves the stream live and
+// the other platforms' legs untouched.
+apiRouter.post('/streams/:id/live/:platform/retry', async (req: Request, res: Response) => {
+  try {
+    const { retryPlatformLive } = await import('../stream/manager.js');
+    await retryPlatformLive(param(req, 'id'), param(req, 'platform') as 'youtube' | 'facebook' | 'twitch');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 apiRouter.post('/streams/:id/go-live', async (req: Request, res: Response) => {
   try {
     const { goLive } = await import('../stream/manager.js');

@@ -8,6 +8,24 @@ import { config } from '../config.js';
 
 export const authRouter = Router();
 
+/**
+ * Finish an OAuth callback in a way that works for both entry points. If the flow was opened as a
+ * popup (has window.opener) — the mid-stream "Reconnect" path — notify the app via postMessage and
+ * close, so the operator's current tab (possibly the live Web Studio ingest) never navigates. When
+ * there's no opener (the classic Settings connect), fall back to a full-page redirect to Settings.
+ */
+function finishOAuth(res: Response, platform: string, ok: boolean, redirectQuery: string): void {
+  const msg = JSON.stringify({ source: 'oauth', platform, ok });
+  const redirect = JSON.stringify('/settings?' + redirectQuery);
+  res.type('html').send(
+    `<!doctype html><meta charset="utf-8"><body style="font:16px sans-serif;padding:24px">`
+    + `<script>(function(){var m=${msg};try{if(window.opener&&!window.opener.closed){`
+    + `window.opener.postMessage(m,window.location.origin);window.close();return;}}catch(e){}`
+    + `location.replace(${redirect});})();</script>`
+    + `You can close this window.</body>`,
+  );
+}
+
 // --- OAuth CSRF protection ---
 //
 // Each connect flow is tied to a one-time, short-lived `state` nonce. The nonce is minted only
@@ -59,15 +77,15 @@ authRouter.get('/youtube/callback', async (req: Request, res: Response) => {
     return;
   }
   if (!consumeState(req.query.state)) {
-    res.redirect('/settings?error=youtube');
+    finishOAuth(res, 'youtube', false, 'error=youtube');
     return;
   }
   try {
     await handleYouTubeCallback(code);
-    res.redirect('/settings?connected=youtube');
+    finishOAuth(res, 'youtube', true, 'connected=youtube');
   } catch (err) {
     console.error('[auth/youtube] Callback error:', err);
-    res.redirect('/settings?error=youtube');
+    finishOAuth(res, 'youtube', false, 'error=youtube');
   }
 });
 
@@ -88,16 +106,17 @@ authRouter.get('/facebook/callback', async (req: Request, res: Response) => {
     return;
   }
   if (!consumeState(req.query.state)) {
-    res.redirect('/settings?error=facebook');
+    finishOAuth(res, 'facebook', false, 'error=facebook');
     return;
   }
   try {
     await handleFacebookCallback(code);
-    // Redirect to settings where user will pick a page
-    res.redirect('/settings?connected=facebook&pick_page=true');
+    // Fallback redirect lands on Settings with the page picker open; the popup path notifies the app
+    // (a fresh connect needs a Page re-selected in Settings before Facebook is usable again).
+    finishOAuth(res, 'facebook', true, 'connected=facebook&pick_page=true');
   } catch (err) {
     console.error('[auth/facebook] Callback error:', err);
-    res.redirect('/settings?error=facebook');
+    finishOAuth(res, 'facebook', false, 'error=facebook');
   }
 });
 
@@ -118,14 +137,14 @@ authRouter.get('/twitch/callback', async (req: Request, res: Response) => {
     return;
   }
   if (!consumeState(req.query.state)) {
-    res.redirect('/settings?error=twitch');
+    finishOAuth(res, 'twitch', false, 'error=twitch');
     return;
   }
   try {
     await handleTwitchCallback(code);
-    res.redirect('/settings?connected=twitch');
+    finishOAuth(res, 'twitch', true, 'connected=twitch');
   } catch (err) {
     console.error('[auth/twitch] Callback error:', err);
-    res.redirect('/settings?error=twitch');
+    finishOAuth(res, 'twitch', false, 'error=twitch');
   }
 });

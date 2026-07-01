@@ -17,9 +17,11 @@ import {
   Grid,
   SegmentedControl,
   Tooltip,
+  Alert,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { api } from '../lib/api';
+import { reconnectPlatform } from '../lib/reauth';
 import { useSSE } from '../hooks/useSSE';
 import { useStudioLive, isIntentionalExit } from '../lib/studioLive';
 import { FFmpegLog } from '../components/FFmpegLog';
@@ -106,6 +108,10 @@ export function StreamPage() {
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Per-platform auth health (go-live pre-check + live reconnect) and reconnect-in-progress marker.
+  const [authHealth, setAuthHealth] = useState<Record<string, { connected: boolean; ok: boolean }> | null>(null);
+  const [reconnecting, setReconnecting] = useState<string | null>(null);
+
   // Refs to call studio connect/disconnect from action button
   const studioConnectRef = useRef<(() => void) | null>(null);
   const studioDisconnectRef = useRef<(() => void) | null>(null);
@@ -161,6 +167,15 @@ export function StreamPage() {
   }, [id]);
 
   useEffect(() => { refreshStream(); }, [refreshStream]);
+
+  // Pre-check / live auth health: know which connected platforms have a working login so we can warn
+  // before go-live and offer reconnect while live. Cheap and only fetched in ready/live phases.
+  const checkAuthHealth = useCallback(() => {
+    api.getAuthHealth().then(setAuthHealth).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (stream?.status === 'ready' || stream?.status === 'live') checkAuthHealth();
+  }, [stream?.status, checkAuthHealth]);
 
   // Poll source status when in ready state — only when in OBS mode or mode not yet chosen
   useEffect(() => {
@@ -229,6 +244,26 @@ export function StreamPage() {
     }
   }
 
+  // Reconnect a platform's login via an OAuth popup — safe mid-stream because it doesn't navigate
+  // the current tab (which may be the live Web Studio source). Re-checks health + refreshes after.
+  async function handleReconnect(platform: string) {
+    setReconnecting(platform);
+    try {
+      const ok = await reconnectPlatform(platform as 'youtube' | 'facebook' | 'twitch');
+      if (ok) {
+        notifications.show({ title: 'Reconnected', message: `${platform} reconnected`, color: 'green' });
+        checkAuthHealth();
+        await refreshStream();
+      } else {
+        notifications.show({ title: 'Not reconnected', message: `${platform} reconnect was cancelled`, color: 'yellow' });
+      }
+    } catch (err) {
+      notifications.show({ title: 'Reconnect failed', message: String(err), color: 'red' });
+    } finally {
+      setReconnecting(null);
+    }
+  }
+
   async function handleEditSave(formData: FormData) {
     if (!stream) return;
     await api.updateStream(stream.id, formData);
@@ -252,6 +287,16 @@ export function StreamPage() {
   const canEdit = !isLive;
   const canDelete = isDraft || isReady;
   const modeToggleDisabled = isLive;
+
+  // Connected platforms whose login is currently broken — surfaced as a pre-go-live warning.
+  const unhealthyPlatforms = authHealth
+    ? Object.entries(authHealth).filter(([, v]) => v.connected && !v.ok).map(([p]) => p)
+    : [];
+
+  // Marker for the per-platform "Retry go-live" spinner (actionLoading is set to `retrylive-<p>`).
+  const retryingLivePlatform = actionLoading?.startsWith('retrylive-')
+    ? actionLoading.replace('retrylive-', '')
+    : null;
 
   // --- Header ---
   const header = (
@@ -370,6 +415,32 @@ export function StreamPage() {
     <Stack>
       {modeToggle}
 
+      {/* Pre-go-live auth warning: connected platforms whose login is broken will be skipped at
+          go-live until reconnected. Non-blocking — you can still go live on the healthy ones. */}
+      {isReady && unhealthyPlatforms.length > 0 && (
+        <Alert color="orange" title="Some platforms need reconnecting">
+          <Stack gap="xs">
+            <Text size="sm">
+              These platforms have an expired login and will be skipped at go-live until reconnected:
+            </Text>
+            <Group>
+              {unhealthyPlatforms.map((p) => (
+                <Button
+                  key={p}
+                  size="xs"
+                  variant="light"
+                  tt="capitalize"
+                  loading={reconnecting === p}
+                  onClick={() => handleReconnect(p)}
+                >
+                  Reconnect {p}
+                </Button>
+              ))}
+            </Group>
+          </Stack>
+        </Alert>
+      )}
+
       {/* Live badge */}
       {isLive && (
         <Group>
@@ -391,6 +462,7 @@ export function StreamPage() {
           onStatusChange={setStudioStatus}
           onConnectRef={studioConnectRef}
           onDisconnectRef={studioDisconnectRef}
+          autoTestConnection={isReady}
         />
       )}
 
@@ -450,7 +522,11 @@ export function StreamPage() {
         platforms={stream.platforms}
         streamStatus={stream.status}
         onRetry={(platform) => handleAction(`retry-${platform}`, () => api.setupPlatform(stream.id, platform))}
-        retryingPlatform={actionLoading?.startsWith('retry-') ? actionLoading.replace('retry-', '') : null}
+        retryingPlatform={actionLoading?.startsWith('retry-') && !actionLoading.startsWith('retrylive-') ? actionLoading.replace('retry-', '') : null}
+        onReconnect={handleReconnect}
+        onRetryLive={(platform) => handleAction(`retrylive-${platform}`, () => api.retryPlatformLive(stream.id, platform))}
+        reconnectingPlatform={reconnecting}
+        retryingLivePlatform={retryingLivePlatform}
       />
       <EventLogCard events={stream.events} />
       {isLive && <FFmpegLog events={sseEvents} connected={sseConnected} />}
