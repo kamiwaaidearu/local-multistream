@@ -10,14 +10,32 @@ import {
   Stack,
   Divider,
 } from '@mantine/core';
+import { notifications } from '@mantine/notifications';
 import { useStreams } from '../hooks/useStreams';
 import { StreamCard } from '../components/StreamCard';
 import { SeriesCreator } from '../components/SeriesCreator';
+import { api } from '../lib/api';
 
 export function Dashboard() {
   const { streams, refresh } = useStreams();
   const navigate = useNavigate();
   const [seriesOpen, setSeriesOpen] = useState(false);
+  const [settingUpSeries, setSettingUpSeries] = useState<string | null>(null);
+
+  // Set up platforms for every event in a series in one call (POST /api/series/:id/setup, which
+  // runs the same per-stream setup used on the StreamPage). Draft events become 'ready'.
+  async function handleSetupSeries(seriesId: string) {
+    setSettingUpSeries(seriesId);
+    try {
+      await api.setupSeries(seriesId);
+      notifications.show({ title: 'Series ready', message: 'Platforms set up for all events', color: 'green' });
+      refresh();
+    } catch (err) {
+      notifications.show({ title: 'Setup failed', message: String(err), color: 'red' });
+    } finally {
+      setSettingUpSeries(null);
+    }
+  }
 
   const upcoming = streams.filter((s) => s.status !== 'ended');
   const completed = streams.filter((s) => s.status === 'ended');
@@ -45,23 +63,41 @@ export function Dashboard() {
 
     return (
       <Stack>
-        {series.map(([seriesId, seriesStreams]) => (
-          <Stack key={seriesId} gap="xs">
-            <Text size="sm" fw={500} c="dimmed">
-              Series ({seriesStreams.length} events)
-            </Text>
-            <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
-              {seriesStreams.map((stream) => (
-                <StreamCard
-                  key={stream.id}
-                  stream={stream}
-                  onClick={() => navigate(`/streams/${stream.id}`)}
-                />
-              ))}
-            </SimpleGrid>
-            <Divider />
-          </Stack>
-        ))}
+        {series.map(([seriesId, seriesStreams]) => {
+          // The batch endpoint sets up every event and rejects if any isn't draft/ready, so only
+          // offer it when the whole series is still setuppable and at least one event needs it.
+          const canSetupAll = seriesStreams.some((s) => s.status === 'draft')
+            && seriesStreams.every((s) => s.status === 'draft' || s.status === 'ready');
+          return (
+            <Stack key={seriesId} gap="xs">
+              <Group justify="space-between">
+                <Text size="sm" fw={500} c="dimmed">
+                  Series ({seriesStreams.length} events)
+                </Text>
+                {canSetupAll && (
+                  <Button
+                    size="xs"
+                    variant="light"
+                    loading={settingUpSeries === seriesId}
+                    onClick={() => handleSetupSeries(seriesId)}
+                  >
+                    Set up all platforms
+                  </Button>
+                )}
+              </Group>
+              <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
+                {seriesStreams.map((stream) => (
+                  <StreamCard
+                    key={stream.id}
+                    stream={stream}
+                    onClick={() => navigate(`/streams/${stream.id}`)}
+                  />
+                ))}
+              </SimpleGrid>
+              <Divider />
+            </Stack>
+          );
+        })}
 
         {standalone.length > 0 && (
           <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>

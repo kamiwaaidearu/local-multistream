@@ -218,6 +218,19 @@ apiRouter.post('/series', upload.array('thumbnails', 20), (req: Request, res: Re
     return;
   }
 
+  // Map each uploaded thumbnail to its entry. The client sends only real images plus a parallel
+  // `thumbnail_indices` array (append order → entry index). Falls back to positional mapping if the
+  // index array is absent, e.g. a client that uploads one file per entry.
+  let thumbnailIndices: number[] = [];
+  if (typeof req.body.thumbnail_indices === 'string') {
+    try { thumbnailIndices = JSON.parse(req.body.thumbnail_indices); } catch { /* leave empty */ }
+  }
+  const thumbnailByEntry = new Map<number, string>();
+  files.forEach((file, i) => {
+    const entryIdx = thumbnailIndices.length ? thumbnailIndices[i] : i;
+    if (typeof entryIdx === 'number') thumbnailByEntry.set(entryIdx, `/uploads/${file.filename}`);
+  });
+
   const insertStmt = db.prepare(`
     INSERT INTO streams (id, series_id, name, description, thumbnail_path, scheduled_start, status, created_at)
     VALUES (?, ?, ?, ?, ?, ?, 'draft', ?)
@@ -226,18 +239,21 @@ apiRouter.post('/series', upload.array('thumbnails', 20), (req: Request, res: Re
   const created: Stream[] = [];
   const now = Date.now();
 
-  // DatabaseSync.transaction() exists at runtime but isn't in the type defs yet
-  const transaction = (db as unknown as { transaction: (fn: () => void) => () => void }).transaction;
-  const insertAll = transaction(() => {
+  // node:sqlite's DatabaseSync has no better-sqlite3-style transaction() helper, so drive the
+  // transaction manually — all-or-nothing so a mid-batch failure doesn't leave a partial series.
+  db.exec('BEGIN');
+  try {
     streamEntries.forEach((entry, i) => {
       const id = nanoid();
-      const thumbnail = files[i] ? `/uploads/${files[i].filename}` : null;
+      const thumbnail = thumbnailByEntry.get(i) ?? null;
       insertStmt.run(id, seriesId, entry.name, entry.description ?? null, thumbnail, entry.scheduled_start ?? null, now);
       created.push(db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream);
     });
-  });
-
-  insertAll();
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
   res.status(201).json({ series_id: seriesId, streams: created });
 });
 

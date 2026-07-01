@@ -75,14 +75,16 @@ export function SeriesCreator({ opened, onClose, onCreated }: SeriesCreatorProps
       }));
       formData.append('streams', JSON.stringify(streamsJson));
 
-      entries.forEach((e) => {
+      // Only append real images (empty-blob padding trips the server's JPEG/PNG filter). A parallel
+      // index array tells the server which entry each uploaded file belongs to, in append order.
+      const thumbnailIndices: number[] = [];
+      entries.forEach((e, i) => {
         if (e.thumbnail) {
           formData.append('thumbnails', e.thumbnail);
-        } else {
-          // Append empty blob to keep index alignment
-          formData.append('thumbnails', new Blob(), '');
+          thumbnailIndices.push(i);
         }
       });
+      formData.append('thumbnail_indices', JSON.stringify(thumbnailIndices));
 
       await api.createSeries(formData);
       notifications.show({ title: 'Success', message: `Created ${entries.length} streams`, color: 'green' });

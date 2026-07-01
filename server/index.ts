@@ -2,6 +2,7 @@ import express from 'express';
 import https from 'https';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 import { config, validateConfig } from './config.js';
 import { getDb, closeDb } from './db/index.js';
 import { apiRouter } from './routes/api.js';
@@ -20,6 +21,19 @@ const app = express();
 if (config.trustProxy !== null) {
   app.set('trust proxy', config.trustProxy);
 }
+
+// Request logging for API/auth calls: method, path, status, duration. Static assets and the SPA
+// shell are skipped to keep the log focused on meaningful activity. 5xx logs at error level.
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api') && !req.path.startsWith('/auth')) return next();
+  const started = Date.now();
+  res.on('finish', () => {
+    const line = `[http] ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - started}ms`;
+    if (res.statusCode >= 500) console.error(line);
+    else console.log(line);
+  });
+  next();
+});
 
 // Middleware
 app.use(express.json());
@@ -51,8 +65,37 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(clientDist, 'index.html'));
 });
 
+// Central error handler — must be last. Logs the failure with request context and returns clean
+// JSON instead of Express's default HTML 500. Also maps multer upload rejections to 400s so a bad
+// thumbnail (too large / wrong type) reads as a clear client error rather than a server crash.
+const errorHandler: express.ErrorRequestHandler = (err, req, res, next) => {
+  let status = 500;
+  let message = err?.message || 'Internal server error';
+  if (err?.code === 'LIMIT_FILE_SIZE') { status = 400; message = 'Image too large (max 2MB per file)'; }
+  else if (/only jpeg and png/i.test(message)) { status = 400; }
+
+  console.error(`[error] ${req.method} ${req.originalUrl} → ${status}: ${message}`);
+  if (status >= 500 && err?.stack) console.error(err.stack);
+
+  if (res.headersSent) { next(err); return; }
+  res.status(status).json({ error: message });
+};
+app.use(errorHandler);
+
+// Best-effort build identity so a restart's logs make it obvious which code is live.
+function gitCommit(): string {
+  try {
+    return execSync('git rev-parse --short HEAD', { cwd: __dirname, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString().trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
 // Startup
 async function start(): Promise<void> {
+  console.log(`[server] Booting ${new Date().toISOString()} | node ${process.version} | commit ${gitCommit()} | NODE_ENV=${process.env.NODE_ENV ?? 'development'}`);
+
   validateConfig();
   getDb(); // Initialize database
 
