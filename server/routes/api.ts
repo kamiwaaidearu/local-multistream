@@ -459,7 +459,7 @@ apiRouter.get('/ffmpeg/version', async (_req: Request, res: Response) => {
   }
 });
 
-// --- SSE & OBS status ---
+// --- SSE ---
 
 apiRouter.get('/stream/events', async (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -480,7 +480,3 @@ apiRouter.get('/stream/events', async (req: Request, res: Response) => {
   });
 });
 
-apiRouter.get('/stream/obs-status', async (_req: Request, res: Response) => {
-  const { isObsConnected } = await import('../rtmp/server.js');
-  res.json({ connected: isObsConnected() });
-});

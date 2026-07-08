@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { recommendQuality, computeMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, type ProbeSample } from './bandwidthProbe';
+import { recommendQuality, computeMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, DEFAULT_QUALITY, type ProbeSample } from './bandwidthProbe';
 
 describe('recommendQuality', () => {
   // Thresholds derive from each preset's (video + 0.16 audio) total × 1.6 headroom:
@@ -44,6 +44,20 @@ describe('QUALITY_PRESETS', () => {
   it('bitrates increase from low to high', () => {
     expect(QUALITY_PRESETS.low.videoBps).toBeLessThan(QUALITY_PRESETS.medium.videoBps);
     expect(QUALITY_PRESETS.medium.videoBps).toBeLessThan(QUALITY_PRESETS.high.videoBps);
+  });
+});
+
+describe('DEFAULT_QUALITY', () => {
+  it('defaults to the lowest preset so an unmeasured connection cannot over-commit', () => {
+    expect(DEFAULT_QUALITY).toBe('low');
+    // Nothing should sit below the default — it must be the floor.
+    expect(QUALITY_PRESETS[DEFAULT_QUALITY].videoBps).toBe(
+      Math.min(...Object.values(QUALITY_PRESETS).map((p) => p.videoBps)),
+    );
+  });
+
+  it('is a valid preset key', () => {
+    expect(QUALITY_PRESETS[DEFAULT_QUALITY]).toBeDefined();
   });
 });
 

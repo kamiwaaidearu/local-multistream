@@ -169,7 +169,7 @@ export async function transitionToLive(broadcastId: string, streamId: string): P
 
     if (status === 'active') break;
     if (status === 'error') throw new Error('YouTube stream is in error state');
-    if (i === 23) throw new Error('YouTube stream did not become active within 2 minutes — check OBS connection');
+    if (i === 23) throw new Error('YouTube stream did not become active within 2 minutes — check your video source (OBS or Web Studio)');
 
     await new Promise((r) => setTimeout(r, 5000));
   }

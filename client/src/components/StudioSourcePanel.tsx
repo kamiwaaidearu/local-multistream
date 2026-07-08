@@ -18,7 +18,7 @@ import { notifications } from '@mantine/notifications';
 import { useCanvasCompositor, type GridTemplate } from '../hooks/useCanvasCompositor';
 import { useAudioMixer, type AudioSourceKind } from '../hooks/useAudioMixer';
 import { useStudioStream } from '../hooks/useStudioStream';
-import { measureUploadMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, recommendQuality, type QualityKey } from '../lib/bandwidthProbe';
+import { measureUploadMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, recommendQuality, DEFAULT_QUALITY, type QualityKey } from '../lib/bandwidthProbe';
 import { FALLBACK_TEMPLATE } from '../lib/gridTemplate';
 import { TemplateEditor } from './TemplateEditor';
 import { api } from '../lib/api';
@@ -60,10 +60,11 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   // Advanced sections (hidden by default to keep the operator view simple)
   const [showLayout, setShowLayout] = useState(false);
 
-  // Stream quality (Leg-1 / browser encode bitrate). Defaults to Medium; the bandwidth test —
-  // run automatically on arrival, or again via "Test my connection" — measures the operator's
-  // upload and pre-selects a preset their link should sustain.
-  const [quality, setQuality] = useState<QualityKey>('medium');
+  // Stream quality (Leg-1 / browser encode bitrate). Defaults to Low (see DEFAULT_QUALITY) so a
+  // slow/unmeasured connection never over-commits; the bandwidth test — run automatically on
+  // arrival, or again via "Test my connection" — then measures the operator's upload and raises
+  // this to whatever preset their link can actually sustain.
+  const [quality, setQuality] = useState<QualityKey>(DEFAULT_QUALITY);
   const [probing, setProbing] = useState(false);
   const [probeMbps, setProbeMbps] = useState<number | null>(null);
   const [recommendedQuality, setRecommendedQuality] = useState<QualityKey | null>(null);

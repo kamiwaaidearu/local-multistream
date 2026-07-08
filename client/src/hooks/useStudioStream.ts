@@ -1,6 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { wsUrl } from '../lib/ws';
-import { QUALITY_PRESETS } from '../lib/bandwidthProbe';
+import { QUALITY_PRESETS, DEFAULT_QUALITY } from '../lib/bandwidthProbe';
 import { getAuthToken } from '../lib/authToken';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -9,7 +9,7 @@ interface UseStudioStreamOptions {
   compositeVideoStream: MediaStream | null;
   mixedAudioStream: MediaStream | null;
   timeslice?: number; // ms between chunks, default 1000
-  videoBitsPerSecond?: number; // MediaRecorder video target; defaults to the medium preset
+  videoBitsPerSecond?: number; // MediaRecorder video target; defaults to the DEFAULT_QUALITY preset
 }
 
 interface UseStudioStreamResult {
@@ -29,7 +29,7 @@ export function useStudioStream({
   compositeVideoStream,
   mixedAudioStream,
   timeslice = 1000,
-  videoBitsPerSecond = QUALITY_PRESETS.medium.videoBps,
+  videoBitsPerSecond = QUALITY_PRESETS[DEFAULT_QUALITY].videoBps,
 }: UseStudioStreamOptions): UseStudioStreamResult {
   const [status, setStatus] = useState<StudioStatus>('disconnected');
   const [error, setError] = useState<string | null>(null);

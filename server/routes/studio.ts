@@ -3,7 +3,8 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { isStudioConnected } from '../studio/ingest.js';
-import { isObsConnected } from '../rtmp/server.js';
+import { isRtmpPublishing } from '../rtmp/server.js';
+import { resolveSourceStatus } from '../studio/sourceStatus.js';
 import { getDb, DEFAULT_GRID_TEMPLATE } from '../db/index.js';
 import { config } from '../config.js';
 
@@ -26,14 +27,9 @@ export const studioRouter = Router();
 // --- Studio status ---
 
 studioRouter.get('/status', (_req: Request, res: Response) => {
-  const studio = isStudioConnected();
-  const obs = isObsConnected();
-
-  let source: 'studio' | 'obs' | null = null;
-  if (studio) source = 'studio';
-  else if (obs) source = 'obs';
-
-  res.json({ connected: studio || obs, source });
+  // isRtmpPublishing() is true for BOTH sources (Studio's ingest publishes to the same RTMP key),
+  // so the Studio WebSocket is the tiebreaker — see resolveSourceStatus.
+  res.json(resolveSourceStatus(isStudioConnected(), isRtmpPublishing()));
 });
 
 // RTMP ingest details for the OBS panel — sourced from server config (RTMP_PORT / LOCAL_STREAM_KEY)

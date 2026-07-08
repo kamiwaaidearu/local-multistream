@@ -113,7 +113,6 @@ export const api = {
     request<{ url: string }>(`/auth/${platform}/start`),
 
   // Status
-  getObsStatus: () => request<{ connected: boolean }>('/api/stream/obs-status'),
   getSourceStatus: () => request<{ connected: boolean; source: 'obs' | 'studio' | null }>('/api/studio/status'),
   getFfmpegVersion: () => request<{ version: string | null; path: string | null }>('/api/ffmpeg/version'),
 

@@ -40,6 +40,11 @@ export const QUALITY_PRESETS: Record<QualityKey, QualityPreset> = {
   },
 };
 
+// The quality preset selected before any bandwidth measurement runs. Low on purpose: a slow or
+// unmeasured connection must never over-commit its uplink, and the auto probe raises it to whatever
+// the link can actually sustain. Single source of truth for the Studio panel and the stream hook.
+export const DEFAULT_QUALITY: QualityKey = 'low';
+
 // Headroom: measured upload must exceed the stream's TOTAL (video+audio) bitrate by this factor.
 // Industry guidance for live streaming runs ~1.5x at minimum (Twitch's stated rule) up to ~2x
 // ("use no more than half your upload"). We use 1.6x: a remote, tunneled uplink wants margin for

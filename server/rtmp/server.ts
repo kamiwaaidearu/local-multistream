@@ -3,10 +3,15 @@ import NodeMediaServer from 'node-media-server';
 import { config } from '../config.js';
 
 let nms: InstanceType<typeof NodeMediaServer> | null = null;
-let obsConnected = false;
+// True while SOMETHING is publishing to the local RTMP key. The RTMP server can't tell who the
+// publisher is — it's OBS when the operator points OBS here, or Web Studio's own ingest FFmpeg
+// when the browser studio is live (that ingest publishes to this same key). So this is
+// deliberately source-agnostic; callers that need to distinguish OBS from Studio check
+// isStudioConnected() first (see /api/studio/status).
+let rtmpPublishing = false;
 
-export function isObsConnected(): boolean {
-  return obsConnected;
+export function isRtmpPublishing(): boolean {
+  return rtmpPublishing;
 }
 
 export function startRtmpServer(): void {
@@ -26,8 +31,9 @@ export function startRtmpServer(): void {
   nms.on('prePublish', (id: string, streamPath: string) => {
     const expectedPath = `/live/${config.localStreamKey}`;
     if (streamPath === expectedPath) {
-      obsConnected = true;
-      console.log(`[rtmp] OBS connected: ${streamPath}`);
+      rtmpPublishing = true;
+      // Source-agnostic on purpose: this is either OBS or Web Studio's ingest FFmpeg.
+      console.log(`[rtmp] Publisher connected: ${streamPath}`);
     } else {
       // Actually drop the session. node-media-server only aborts a publish if a prePublish
       // listener calls session.reject(); the old code merely logged, so a wrong (or absent)
@@ -40,8 +46,8 @@ export function startRtmpServer(): void {
   nms.on('donePublish', (_id: string, streamPath: string) => {
     const expectedPath = `/live/${config.localStreamKey}`;
     if (streamPath === expectedPath) {
-      obsConnected = false;
-      console.log('[rtmp] OBS disconnected');
+      rtmpPublishing = false;
+      console.log('[rtmp] Publisher disconnected');
     }
   });
 
@@ -53,7 +59,7 @@ export function stopRtmpServer(): void {
   if (nms) {
     nms.stop();
     nms = null;
-    obsConnected = false;
+    rtmpPublishing = false;
     console.log('[rtmp] RTMP server stopped');
   }
 }

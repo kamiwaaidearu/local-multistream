@@ -24,6 +24,7 @@ import { api } from '../lib/api';
 import { reconnectPlatform } from '../lib/reauth';
 import { useSSE } from '../hooks/useSSE';
 import { useStudioLive, isIntentionalExit } from '../lib/studioLive';
+import { shouldShowStudioReconnect } from '../lib/studioRecovery';
 import { FFmpegLog } from '../components/FFmpegLog';
 import { PlatformStatusCard } from '../components/PlatformStatusCard';
 import { EventLogCard } from '../components/EventLogCard';
@@ -453,6 +454,27 @@ export function StreamPage() {
         </Group>
       )}
 
+      {/* Studio reconnect: if this tab was closed/reloaded while live, the Studio panel remounts
+          disconnected with no "Go Live" button to hang a connect action off (that button only
+          exists in the ready phase). Without this, the operator has no way back in — the fan-out
+          legs retry for ~35s and then give up while the broadcast sits live but silent. */}
+      {shouldShowStudioReconnect(stream.status, mode, studioStatus) && (
+        <Alert color="orange" title="Studio source disconnected">
+          <Stack gap="xs">
+            <Text size="sm">
+              This tab lost its connection to the broadcast — likely from closing or reloading it.
+              The stream is still live on the platforms; re-enable your camera/mic below if needed,
+              then reconnect before the fan-out gives up retrying.
+            </Text>
+            <Group>
+              <Button size="xs" color="orange" onClick={() => studioConnectRef.current?.()}>
+                Reconnect Studio
+              </Button>
+            </Group>
+          </Stack>
+        </Alert>
+      )}
+
       {/* Source panels */}
       {mode === 'obs' && (isReady || isLive) && (
         <ObsSourcePanel sourceConnected={sourceConnected} sourceType={sourceType} />
@@ -587,7 +609,14 @@ export function StreamPage() {
       {/* End Stream Confirmation */}
       <Modal opened={confirmEnd} onClose={() => setConfirmEnd(false)} title="End Stream">
         <Stack>
-          <Text>Are you sure you want to end this stream? This will stop all platform broadcasts.</Text>
+          <Text>
+            Are you sure you want to end this stream? This stops all platform broadcasts and
+            finalizes the recordings.
+          </Text>
+          <Text fw={600} c="red">
+            This cannot be undone — once ended, the broadcast cannot be restarted or resumed. You'd
+            need to create and set up a new stream to go live again.
+          </Text>
           <Group justify="flex-end">
             <Button variant="subtle" onClick={() => setConfirmEnd(false)}>Cancel</Button>
             <Button

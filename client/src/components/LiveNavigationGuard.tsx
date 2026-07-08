@@ -74,7 +74,7 @@ export function LiveNavigationGuard({ logoutOpen, onLogoutOpenChange }: LiveNavi
           {studioLive && (
             <Text c="red" fw={600}>
               ⚠️ You're LIVE via the Web Studio in this tab. Logging out will end the broadcast
-              first — all platforms stop and recordings are finalized.
+              first — all platforms stop and recordings are finalized. This cannot be undone.
             </Text>
           )}
           <Text>You'll need the app password to sign back in.</Text>
@@ -98,7 +98,7 @@ export function LiveNavigationGuard({ logoutOpen, onLogoutOpenChange }: LiveNavi
         <Stack>
           <Text c="red" fw={600}>
             ⚠️ You're LIVE via the Web Studio in this tab. To leave, the broadcast must end —
-            this stops all platform streams and finalizes recordings.
+            this stops all platform streams and finalizes recordings. This cannot be undone.
           </Text>
           <Text size="sm" c="dimmed">
             Staying keeps you live. Choose “End stream &amp; leave” only when you're done.

@@ -352,12 +352,13 @@ export async function goLive(streamId: string): Promise<void> {
   const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(streamId) as unknown as PlatformStream[];
   if (platformStreams.length === 0) throw new Error('No platforms are set up');
 
-  // Verify an ingest source is actually publishing. Without this we'd mark the stream
-  // "live" while nothing flows — the fan-out would retry then give up, and YouTube would
-  // time out after 2 minutes.
-  const { isObsConnected } = await import('../rtmp/server.js');
+  // Verify an ingest source is present. Without this we'd mark the stream "live" while nothing
+  // flows — the fan-out would retry then give up, and YouTube would time out after 2 minutes.
+  // isRtmpPublishing() covers OBS (and a fully-warmed Studio ingest); isStudioConnected() covers
+  // a Studio WebSocket whose ingest FFmpeg may still be establishing its RTMP publish.
+  const { isRtmpPublishing } = await import('../rtmp/server.js');
   const { isStudioConnected } = await import('../studio/ingest.js');
-  if (!isObsConnected() && !isStudioConnected()) {
+  if (!isRtmpPublishing() && !isStudioConnected()) {
     throw new Error('No video source is connected. Start OBS or the Web Studio before going live.');
   }
 

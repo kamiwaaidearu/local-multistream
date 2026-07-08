@@ -3,7 +3,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { spawn, spawnSync, ChildProcess } from 'child_process';
 import { config } from '../config.js';
 import { validateToken } from './auth.js';
-import { isObsConnected } from '../rtmp/server.js';
+import { isRtmpPublishing } from '../rtmp/server.js';
 import { handleBandwidthProbe } from './bandwidthProbe.js';
 import { resolveEncoder, buildVideoArgs, shouldRuntimeFallback, type VideoEncoder } from './encoderConfig.js';
 
@@ -180,8 +180,10 @@ function handleConnection(ws: WebSocket): void {
     return;
   }
 
-  // Don't let Studio and OBS publish to the same RTMP key at once.
-  if (isObsConnected()) {
+  // Don't let Studio and OBS publish to the same RTMP key at once. Studio's own ingest FFmpeg
+  // hasn't started yet at this point (it spawns below), so anything already publishing here is an
+  // external source — i.e. OBS.
+  if (isRtmpPublishing()) {
     console.log('[studio] Rejecting connection — OBS is currently publishing');
     ws.close(4001, 'OBS is currently connected. Disconnect OBS before using Web Studio.');
     return;
@@ -254,7 +256,7 @@ export function initStudioWebSocket(...servers: HttpServer[]): void {
 
       wss.handleUpgrade(request, socket, head, (ws) => {
         if (url.pathname === '/ws/bandwidth') {
-          handleBandwidthProbe(ws, { isBusy: () => studioConnected || isObsConnected() });
+          handleBandwidthProbe(ws, { isBusy: () => studioConnected || isRtmpPublishing() });
         } else {
           handleConnection(ws);
         }
