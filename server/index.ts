@@ -136,6 +136,11 @@ async function start(): Promise<void> {
   // Initialize studio WebSocket on both servers
   const { initStudioWebSocket } = await import('./studio/ingest.js');
   initStudioWebSocket(httpServer, httpsServer);
+
+  // Watchdog: end any live stream whose video source has been gone too long (e.g. the Studio tab
+  // was closed and never reopened), so platform broadcasts aren't left dangling.
+  const { startSourceWatchdog } = await import('./stream/sourceWatchdog.js');
+  startSourceWatchdog();
 }
 
 // Graceful shutdown
@@ -144,6 +149,12 @@ async function shutdown(): Promise<void> {
   if (shuttingDown) return; // ignore repeated signals
   shuttingDown = true;
   console.log('\n[server] Shutting down...');
+
+  // Stop the source watchdog so it can't fire an auto-end while we're already tearing down.
+  try {
+    const { stopSourceWatchdog } = await import('./stream/sourceWatchdog.js');
+    stopSourceWatchdog();
+  } catch { /* not initialized */ }
 
   // End any live stream first so platform broadcasts aren't left dangling. Capped with a
   // timeout so a slow or hung platform API can't block shutdown indefinitely.

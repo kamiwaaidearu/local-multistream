@@ -362,6 +362,20 @@ export async function goLive(streamId: string): Promise<void> {
     throw new Error('No video source is connected. Start OBS or the Web Studio before going live.');
   }
 
+  // Web Studio's WebSocket opens seconds before its ingest FFmpeg has actually published to the
+  // local RTMP server (spawn + webm probe + encode + RTMP handshake). If we started the fan-out on
+  // the WebSocket alone, every relay leg would fire into an empty input and burn its retry budget
+  // before the encoder is ready — the burst of "exited (code ...) — reconnecting" we used to see
+  // at go-live. So when Studio is connected but not yet publishing, wait for the publish first.
+  // OBS always publishes before the operator can click Go Live, so this is effectively Studio-only.
+  if (!isRtmpPublishing() && isStudioConnected()) {
+    const { waitForCondition } = await import('./waitForCondition.js');
+    const published = await waitForCondition(() => isRtmpPublishing(), { timeoutMs: 15000, intervalMs: 500 });
+    if (!published) {
+      throw new Error('The Web Studio is connected but no video has started flowing yet. Give it a moment and try Go Live again.');
+    }
+  }
+
   // Update Twitch title at go-live time
   const twitchPs = platformStreams.find((ps) => ps.platform === 'twitch');
   if (twitchPs) {
