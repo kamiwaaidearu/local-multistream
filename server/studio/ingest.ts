@@ -126,7 +126,18 @@ function startIngestFfmpeg(): ChildProcess {
     ...buildVideoArgs(encoder, preset, config.studioVideoBitrateKbps),
     '-c:a', 'aac',
     '-b:a', `${config.studioAudioBitrateKbps}k`,
+    '-ac', '2',
     '-ar', '48000',
+    // Rebuild a continuous, monotonic audio clock before encoding. The source is a LIVE
+    // MediaRecorder webm/opus pipe, whose sample timestamps jitter (and can go non-monotonic)
+    // against the wall clock. Video is already pinned to CFR upstream (buildVideoArgs), but audio
+    // was passed through raw — so its PTS drifted relative to the rigid video clock. Lenient
+    // ingests (Facebook/Twitch) hide this; YouTube re-segments to a reference clock and corrects
+    // the accumulated drift by dropping/inserting samples at a steady cadence — heard as a periodic
+    // pop (~every 3/4 s). aresample=async stretches/pads audio (with silence) to hold sync so there
+    // are no gaps for YouTube to "fix". This runs at ingest, so the copy-only fan-out carries the
+    // corrected audio to every platform without disturbing the already-good legs.
+    '-af', 'aresample=async=1000:first_pts=0',
     '-f', 'flv',
     rtmpUrl,
   ];
@@ -138,8 +149,13 @@ function startIngestFfmpeg(): ChildProcess {
   child.stderr?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
     if (line) {
-      // Log FFmpeg output for debugging (filter noise)
-      if (line.includes('frame=') || line.includes('Error') || line.includes('error')) {
+      // Log FFmpeg output for debugging (filter noise). Timestamp warnings are included on
+      // purpose: "Non-monotonous DTS", "timestamp discontinuity", etc. are the fingerprint of the
+      // jittery MediaRecorder audio clock behind the YouTube audio-pop issue — surfacing them lets
+      // us confirm the cause (and that the aresample fix above silenced them) on a live stream.
+      if (line.includes('frame=') || line.includes('Error') || line.includes('error') ||
+          line.includes('DTS') || line.includes('PTS') || line.includes('timestamp') ||
+          line.includes('discontinuity')) {
         console.log(`[studio:ffmpeg] ${line}`);
       }
     }
