@@ -4,6 +4,10 @@ client/node_modules/
 client/dist/
 *.tsbuildinfo
 
+# MediaPipe wasm runtime — copied out of node_modules at build time by
+# client/scripts/copy-mediapipe-wasm.mjs, not committed. (The .tflite model IS committed.)
+client/public/mediapipe/wasm/
+
 # Environment
 .env
 

@@ -16,6 +16,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useCanvasCompositor, type GridTemplate } from '../hooks/useCanvasCompositor';
+import { useSegmentedStream } from '../hooks/useSegmentedStream';
 import { useAudioMixer, type AudioSourceKind } from '../hooks/useAudioMixer';
 import { useStudioStream } from '../hooks/useStudioStream';
 import { measureUploadMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, recommendQuality, DEFAULT_QUALITY, type QualityKey } from '../lib/bandwidthProbe';
@@ -61,6 +62,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   const [selectedMicId, setSelectedMicId] = useState<string | null>(null);
   const [webcamEnabled, setWebcamEnabled] = useState(false);
   const [screenEnabled, setScreenEnabled] = useState(false);
+  const [blurBackground, setBlurBackground] = useState(false);
 
   // Advanced sections (hidden by default to keep the operator view simple)
   const [showLayout, setShowLayout] = useState(false);
@@ -123,13 +125,24 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     };
   }, []);
 
-  // Compositor — camera is video-only now; audio is handled entirely by the mixer.
+  // Camera is video-only now (audio is handled entirely by the mixer).
+  const webcamVideoStream = useMemo(
+    () => webcamStream ? new MediaStream(webcamStream.getVideoTracks()) : null,
+    [webcamStream],
+  );
+
+  // Optional background blur (MediaPipe Selfie Segmentation, client-side). When off, this is a
+  // passthrough with no overhead; when on, it swaps in a blurred-background version of the camera.
+  const { outputStream: cameraStream, status: blurStatus } = useSegmentedStream({
+    sourceStream: webcamVideoStream,
+    enabled: blurBackground,
+    blurAmount: 18, // med-high, fixed (no user control for now)
+  });
+
+  // Compositor draws whatever camera stream we hand it — raw or blurred.
   const { canvasRef, compositeStream } = useCanvasCompositor({
     template,
-    webcamStream: useMemo(
-      () => webcamStream ? new MediaStream(webcamStream.getVideoTracks()) : null,
-      [webcamStream],
-    ),
+    webcamStream: cameraStream,
     screenStream,
   });
 
@@ -485,7 +498,23 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
               >
                 {webcamEnabled ? 'Turn off camera' : 'Turn on camera'}
               </Button>
+              {webcamEnabled && (
+                <Button
+                  size="xs"
+                  variant={blurBackground ? 'filled' : 'light'}
+                  color={blurBackground ? 'blue' : 'gray'}
+                  loading={blurBackground && blurStatus === 'loading'}
+                  onClick={() => setBlurBackground((b) => !b)}
+                >
+                  {blurBackground ? '✓ Background blurred' : 'Blur background'}
+                </Button>
+              )}
             </Group>
+            {webcamEnabled && blurBackground && blurStatus === 'error' && (
+              <Text size="xs" c="red">
+                Background blur couldn’t start on this device — showing the normal camera instead.
+              </Text>
+            )}
           </Stack>
         </Group>
       </Card>
