@@ -30,12 +30,16 @@ export function evaluateSourcePresence(
   return { shouldEnd: now - lastSeenAt >= graceMs, lastSeenAt };
 }
 
-// End an abandoned broadcast 3 minutes after its source disappears. Deliberately generous: it must
-// never end a *recoverable* stream, so it has to outlast (a) a network drop the operator is waiting
-// out with the tab still open, and (b) a deliberate tab-reopen where they re-share slides + camera
-// before reconnecting. The cost is only that a genuinely abandoned stream lingers a few minutes
-// before auto-cleanup. Tune here if that balance needs adjusting.
-const GRACE_MS = 180_000;
+// End an abandoned broadcast 5 minutes after its source disappears. Deliberately generous: it must
+// never end a *recoverable* stream, so it has to outlast (a) a router/modem reboot (~1-3 min) the
+// operator is waiting out, (b) a network drop with the tab still open, and (c) a deliberate
+// tab-reopen where they re-share slides + camera before reconnecting. We intentionally do NOT cap
+// this to Facebook's few-minute live-video ceiling: FB may be lost past that, but YouTube (with
+// autoStop off + a reusable key) and Twitch can still resume from a longer outage, and killing the
+// whole broadcast to match the one platform we've already lost would be backwards. The only cost of
+// going long is that a genuinely abandoned stream lingers a few extra minutes (endable manually from
+// any device) before auto-cleanup. Tune here if that balance needs adjusting.
+const GRACE_MS = 300_000;
 const TICK_MS = 15_000;
 
 const lastSeen = new Map<string, number>();
