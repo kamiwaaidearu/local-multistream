@@ -1,6 +1,8 @@
 import { spawn, ChildProcess } from 'child_process';
 import { getDb } from '../db/index.js';
 import { config } from '../config.js';
+import { isRtmpPublishing } from '../rtmp/server.js';
+import { decideFanoutRetry, MAX_PLATFORM_RETRIES } from './retryPolicy.js';
 import type { PlatformStream } from '../types.js';
 
 // Get ffmpeg binary path
@@ -121,39 +123,41 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
 
     // Stream is still live but FFmpeg exited. Either it crashed, OR — commonly — the local
     // RTMP input ended because the source (Studio/OBS) dropped. FFmpeg exits 0 on a clean
-    // input EOF, so code 0 is NOT "all done" here. Reconnect: the source may be coming back
-    // (the studio auto-reconnects), and we resume the fan-out once local RTMP republishes.
+    // input EOF, so code 0 is NOT "all done" here.
+    const ranMs = Date.now() - proc.startedAt;
     console.warn(`[ffmpeg] ${ps.platform} exited (code ${code}) while stream is live — reconnecting`);
-    logEvent(streamId, ps.platform, 'ffmpeg_disconnected', `Exit code: ${code}`);
+    // Only persist a disconnect for a leg that had actually been streaming — not the rapid
+    // reconnect probes during an outage (each runs only seconds and would otherwise flood the log).
+    if (ranMs > 15000) logEvent(streamId, ps.platform, 'ffmpeg_disconnected', `Exit code: ${code}`);
 
-    // Circuit breaker: exponential backoff, max 3 retries
-    const MAX_RETRIES = 3;
-    const BACKOFF = [5000, 10000, 20000];
+    // Two failure modes (see retryPolicy): if the local source is gone, the operator's ingest
+    // dropped and every leg lost its input — keep retrying so all resume when it returns (the
+    // stream watchdog bounds this). If the source is present but this leg keeps dying, it's a
+    // per-platform fault — give up and surface an error after a few tries.
+    const sourcePresent = isRtmpPublishing();
+    const decision = decideFanoutRetry({ sourcePresent, retryCount, ranMs });
 
-    // Reset retry count if the process ran for >60s (was transient)
-    const runDuration = Date.now() - proc.startedAt;
-    const effectiveRetryCount = runDuration > 60000 ? 0 : retryCount;
-
-    if (effectiveRetryCount >= MAX_RETRIES) {
+    if (decision.giveUp) {
       db.prepare("UPDATE platform_streams SET status = 'error', error_message = ? WHERE id = ?").run(
-        `FFmpeg crashed ${MAX_RETRIES} times — gave up`, ps.id,
+        `FFmpeg failed ${MAX_PLATFORM_RETRIES} times while the source was live — gave up`, ps.id,
       );
       logEvent(streamId, ps.platform, 'ffmpeg_gave_up');
       pushSSEEvent({ type: 'ffmpeg_gave_up', platform: ps.platform });
       return;
     }
 
-    const delay = BACKOFF[effectiveRetryCount] ?? 20000;
+    const delay = decision.delayMs;
     db.prepare("UPDATE platform_streams SET status = 'reconnecting' WHERE id = ?").run(ps.id);
     pushSSEEvent({ type: 'ffmpeg_crash', platform: ps.platform, retryIn: delay / 1000 });
 
-    console.log(`[ffmpeg] Retrying ${ps.platform} in ${delay / 1000}s (attempt ${effectiveRetryCount + 1}/${MAX_RETRIES})`);
+    console.log(`[ffmpeg] Retrying ${ps.platform} in ${delay / 1000}s${sourcePresent ? '' : ' (waiting for the source to return)'}`);
 
     setTimeout(() => {
-      // Double-check stream is still live before retrying
+      // Double-check stream is still live before retrying — when the watchdog ends an abandoned
+      // stream, status flips to 'ended' and this retry becomes a no-op, bounding the loop.
       const check = db.prepare('SELECT status FROM streams WHERE id = ?').get(streamId) as { status: string } | undefined;
       if (check?.status === 'live') {
-        spawnFfmpeg(streamId, ps, effectiveRetryCount + 1);
+        spawnFfmpeg(streamId, ps, decision.nextRetryCount);
         pushSSEEvent({ type: 'ffmpeg_reconnecting', platform: ps.platform });
       }
     }, delay);
