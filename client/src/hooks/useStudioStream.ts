@@ -1,6 +1,7 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { wsUrl } from '../lib/ws';
 import { QUALITY_PRESETS, DEFAULT_QUALITY } from '../lib/bandwidthProbe';
+import { nextReconnectStep } from '../lib/studioReconnect';
 import { getAuthToken } from '../lib/authToken';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -10,6 +11,9 @@ interface UseStudioStreamOptions {
   mixedAudioStream: MediaStream | null;
   timeslice?: number; // ms between chunks, default 1000
   videoBitsPerSecond?: number; // MediaRecorder video target; defaults to the DEFAULT_QUALITY preset
+  // While true, never stop auto-reconnecting (capped backoff) — set by the caller while the
+  // broadcast is live server-side so a longer network dip self-heals instead of going terminal.
+  keepReconnecting?: boolean;
 }
 
 interface UseStudioStreamResult {
@@ -20,16 +24,12 @@ interface UseStudioStreamResult {
   backpressureWarning: boolean;
 }
 
-// Reconnect schedule. The first delay is deliberately not tiny: the server needs a moment
-// to release the previous ingest FFmpeg / RTMP publish before a new session can take over.
-const MAX_RECONNECT_ATTEMPTS = 6;
-const RECONNECT_BACKOFF_MS = [2000, 3000, 5000, 8000, 10000, 10000];
-
 export function useStudioStream({
   compositeVideoStream,
   mixedAudioStream,
   timeslice = 1000,
   videoBitsPerSecond = QUALITY_PRESETS[DEFAULT_QUALITY].videoBps,
+  keepReconnecting = false,
 }: UseStudioStreamOptions): UseStudioStreamResult {
   const [status, setStatus] = useState<StudioStatus>('disconnected');
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +54,10 @@ export function useStudioStream({
   // the operator picks quality before going live.
   const videoBitrateRef = useRef(videoBitsPerSecond);
   videoBitrateRef.current = videoBitsPerSecond;
+
+  // Latest "stay live" intent, read at reconnect time so flipping it takes effect immediately.
+  const keepReconnectingRef = useRef(keepReconnecting);
+  keepReconnectingRef.current = keepReconnecting;
 
   // Breaks the openSocket <-> scheduleReconnect dependency cycle.
   const openSocketRef = useRef<() => void>(() => {});
@@ -88,21 +92,21 @@ export function useStudioStream({
 
   const scheduleReconnect = useCallback(() => {
     if (!shouldReconnectRef.current) return;
-    if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+    const attempt = reconnectAttemptsRef.current;
+    const { giveUp, delayMs } = nextReconnectStep(attempt, keepReconnectingRef.current);
+    if (giveUp) {
       shouldReconnectRef.current = false;
       fatalRef.current = true;
       setError('Connection lost — could not reconnect after several attempts');
       setStatus('error');
       return;
     }
-    const attempt = reconnectAttemptsRef.current;
     reconnectAttemptsRef.current += 1;
-    const delay = RECONNECT_BACKOFF_MS[Math.min(attempt, RECONNECT_BACKOFF_MS.length - 1)];
     setStatus('connecting');
-    console.log(`[studio] Reconnecting in ${delay / 1000}s (attempt ${attempt + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+    console.log(`[studio] Reconnecting in ${delayMs / 1000}s (attempt ${attempt + 1}${keepReconnectingRef.current ? ', staying live' : ''})`);
     reconnectTimerRef.current = window.setTimeout(() => {
       openSocketRef.current();
-    }, delay);
+    }, delayMs);
   }, []);
 
   const openSocket = useCallback(() => {
@@ -174,8 +178,9 @@ export function useStudioStream({
       teardownSocket();
       wsRef.current = null;
 
-      // Fatal: another studio session is active, or OBS is publishing. Don't reconnect.
-      if (e.code === 4000 || e.code === 4001) {
+      // Fatal: another studio session is active (4000) or took over this one (4004), or OBS is
+      // publishing (4001). Don't reconnect — retrying would just fight the other session.
+      if (e.code === 4000 || e.code === 4001 || e.code === 4004) {
         shouldReconnectRef.current = false;
         fatalRef.current = true;
         setError(e.reason || 'Studio session was rejected');

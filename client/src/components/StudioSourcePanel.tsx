@@ -41,9 +41,14 @@ interface StudioSourcePanelProps {
    * live, because the probe saturates the uplink for several seconds and would disrupt a broadcast.
    */
   autoTestConnection?: boolean;
+  /**
+   * When true, the transport never stops auto-reconnecting (capped backoff). The parent passes this
+   * while the broadcast is live so a longer network dip self-heals instead of going terminal.
+   */
+  keepReconnecting?: boolean;
 }
 
-export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection }: StudioSourcePanelProps) {
+export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection, keepReconnecting }: StudioSourcePanelProps) {
   const [template, setTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
   const [savedTemplate, setSavedTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
 
@@ -269,6 +274,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     compositeVideoStream: compositeStream,
     mixedAudioStream: mixedStream,
     videoBitsPerSecond: QUALITY_PRESETS[quality].videoBps,
+    keepReconnecting,
   });
 
   // Lift status to parent

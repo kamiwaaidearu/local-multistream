@@ -6,6 +6,7 @@ import { validateToken } from './auth.js';
 import { isRtmpPublishing } from '../rtmp/server.js';
 import { handleBandwidthProbe } from './bandwidthProbe.js';
 import { resolveEncoder, buildVideoArgs, shouldRuntimeFallback, type VideoEncoder } from './encoderConfig.js';
+import { decideStudioConnection } from './sessionTakeover.js';
 
 let ffmpegPath: string;
 try {
@@ -16,6 +17,13 @@ try {
 
 let studioConnected = false;
 let activeWs: WebSocket | null = null;
+// When the active session last sent a media chunk. Used to tell a live session from a dead one
+// (a crashed/closed tab whose socket hasn't closed yet) so a reconnecting operator can take over
+// a stale session without hijacking a healthy one.
+let activeWsLastDataAt = 0;
+// Past this idle time (no chunks) the active session is presumed dead and can be taken over. The
+// client sends webm ~every second, so several seconds of silence means it's gone.
+const STALE_SESSION_MS = 8000;
 let ingestFfmpeg: ChildProcess | null = null;
 // A previous ingest process that's still winding down. Tracked so a fast studio reconnect
 // can hard-stop it before starting a new one — otherwise two FFmpegs would briefly publish
@@ -173,24 +181,38 @@ function startIngestFfmpeg(): ChildProcess {
 }
 
 function handleConnection(ws: WebSocket): void {
-  // Only one studio connection at a time
-  if (activeWs) {
-    console.log('[studio] Rejecting connection — another studio is already connected');
+  const decision = decideStudioConnection({
+    hasActiveSession: activeWs !== null,
+    sessionIdleMs: Date.now() - activeWsLastDataAt,
+    staleMs: STALE_SESSION_MS,
+    // Only consulted when there's no studio session; an active session's own ingest publishes RTMP.
+    obsPublishing: isRtmpPublishing(),
+  });
+
+  if (decision === 'reject-active') {
+    console.log('[studio] Rejecting connection — an active studio session is streaming');
     ws.close(4000, 'Another studio session is already active');
     return;
   }
-
-  // Don't let Studio and OBS publish to the same RTMP key at once. Studio's own ingest FFmpeg
-  // hasn't started yet at this point (it spawns below), so anything already publishing here is an
-  // external source — i.e. OBS.
-  if (isRtmpPublishing()) {
+  if (decision === 'reject-obs') {
     console.log('[studio] Rejecting connection — OBS is currently publishing');
     ws.close(4001, 'OBS is currently connected. Disconnect OBS before using Web Studio.');
     return;
   }
+  if (decision === 'takeover') {
+    // The existing session looks dead (no chunks for a while) — the operator is reclaiming control
+    // after a crash/reload whose socket hasn't closed yet. Replace it: detach so the old socket's
+    // close handler is a no-op, close it (4004 → the client treats it as fatal, won't fight back),
+    // and stop its ingest so we don't end up with two publishers on the RTMP key.
+    console.log('[studio] Taking over a stale studio session (assumed dead)');
+    const old = activeWs;
+    activeWs = null;
+    try { old?.close(4004, 'Replaced by a new studio session'); } catch { /* ignore */ }
+    void stopIngestFfmpeg(); // moves the old ingest to stoppingProc; hard-killed just below
+  }
 
-  // If a previous ingest is still winding down (fast reconnect), hard-stop it now so we
-  // never have two FFmpegs publishing to the same RTMP key.
+  // Hard-stop any winding-down ingest (a fast reconnect, or the takeover above) so we never have
+  // two FFmpegs publishing to the same RTMP key.
   if (stoppingProc) {
     try { stoppingProc.kill('SIGKILL'); } catch { /* ignore */ }
     stoppingProc = null;
@@ -199,12 +221,14 @@ function handleConnection(ws: WebSocket): void {
   console.log('[studio] WebSocket connected');
   activeWs = ws;
   studioConnected = true;
+  activeWsLastDataAt = Date.now(); // grace: treat the fresh session as active from now
 
   // Start ingest FFmpeg
   ingestFfmpeg = startIngestFfmpeg();
 
   ws.on('message', (data: Buffer) => {
     // Binary WebSocket messages are webm chunks — pipe directly to FFmpeg stdin
+    if (activeWs === ws) activeWsLastDataAt = Date.now(); // liveness for takeover staleness checks
     if (ingestFfmpeg?.stdin?.writable) {
       try {
         ingestFfmpeg.stdin.write(data);
