@@ -24,6 +24,11 @@ let activeWsLastDataAt = 0;
 // Past this idle time (no chunks) the active session is presumed dead and can be taken over. The
 // client sends webm ~every second, so several seconds of silence means it's gone.
 const STALE_SESSION_MS = 8000;
+// WebSocket heartbeat: ping this often; if a pong hasn't arrived since the last ping, the socket is
+// dead (a half-open connection from a network partition or power loss, which never sends a TCP
+// FIN). Detecting and closing it flips studioConnected false and stops the ingest — otherwise the
+// abandoned-stream watchdog, which treats a connected socket as "source present", would never fire.
+const HEARTBEAT_INTERVAL_MS = 15000;
 let ingestFfmpeg: ChildProcess | null = null;
 // A previous ingest process that's still winding down. Tracked so a fast studio reconnect
 // can hard-stop it before starting a new one — otherwise two FFmpegs would briefly publish
@@ -226,6 +231,22 @@ function handleConnection(ws: WebSocket): void {
   // Start ingest FFmpeg
   ingestFfmpeg = startIngestFfmpeg();
 
+  // Heartbeat: browsers auto-reply to a WS ping with a pong at the protocol level, so a live client
+  // keeps `isAlive` true. A dead half-open socket (no FIN) stops ponging and gets terminated, which
+  // fires 'close' below → studioConnected=false + ingest stopped → the watchdog can then reclaim it.
+  let isAlive = true;
+  ws.on('pong', () => { isAlive = true; });
+  const heartbeat = setInterval(() => {
+    if (!isAlive) {
+      console.warn('[studio] No pong from the studio socket — terminating it as dead');
+      clearInterval(heartbeat);
+      try { ws.terminate(); } catch { /* ignore */ }
+      return;
+    }
+    isAlive = false;
+    try { ws.ping(); } catch { /* ignore */ }
+  }, HEARTBEAT_INTERVAL_MS);
+
   ws.on('message', (data: Buffer) => {
     // Binary WebSocket messages are webm chunks — pipe directly to FFmpeg stdin
     if (activeWs === ws) activeWsLastDataAt = Date.now(); // liveness for takeover staleness checks
@@ -240,6 +261,7 @@ function handleConnection(ws: WebSocket): void {
 
   ws.on('close', () => {
     console.log('[studio] WebSocket disconnected');
+    clearInterval(heartbeat);
     if (activeWs === ws) {
       activeWs = null;
       stopIngestFfmpeg();
@@ -248,6 +270,7 @@ function handleConnection(ws: WebSocket): void {
 
   ws.on('error', (err) => {
     console.error('[studio] WebSocket error:', err);
+    clearInterval(heartbeat);
     if (activeWs === ws) {
       activeWs = null;
       stopIngestFfmpeg();

@@ -336,6 +336,13 @@ export async function setupSinglePlatform(streamId: string, platform: Platform):
   await setupStream(streamId);
 }
 
+// Guards against two go-lives running at once. Only one stream can be live at a time, and the
+// up-to-15s ingest wait inside goLive widens the window in which two concurrent calls (e.g. two
+// admins, or a double-fire) could both pass the single-live guard and double-start the fan-out.
+// A single server process, so an in-memory flag is sufficient; the check-and-set below is atomic
+// (no await between them).
+let goLiveInFlight = false;
+
 /**
  * Go live — start FFmpeg fan-out and transition YouTube.
  */
@@ -345,121 +352,127 @@ export async function goLive(streamId: string): Promise<void> {
   if (!stream) throw new Error('Stream not found');
   if (stream.status !== 'ready') throw new Error('Stream must be in ready status');
 
-  // Concurrent stream guard
-  const liveStream = db.prepare("SELECT id FROM streams WHERE status = 'live'").get() as { id: string } | undefined;
-  if (liveStream) throw new Error('Another stream is already live. End it first.');
+  if (goLiveInFlight) throw new Error('A go-live is already in progress. Please wait a moment and try again.');
+  goLiveInFlight = true;
+  try {
+    // Concurrent stream guard
+    const liveStream = db.prepare("SELECT id FROM streams WHERE status = 'live'").get() as { id: string } | undefined;
+    if (liveStream) throw new Error('Another stream is already live. End it first.');
 
-  const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(streamId) as unknown as PlatformStream[];
-  if (platformStreams.length === 0) throw new Error('No platforms are set up');
+    const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(streamId) as unknown as PlatformStream[];
+    if (platformStreams.length === 0) throw new Error('No platforms are set up');
 
-  // Verify an ingest source is present. Without this we'd mark the stream "live" while nothing
-  // flows — the fan-out would retry then give up, and YouTube would time out after 2 minutes.
-  // isRtmpPublishing() covers OBS (and a fully-warmed Studio ingest); isStudioConnected() covers
-  // a Studio WebSocket whose ingest FFmpeg may still be establishing its RTMP publish.
-  const { isRtmpPublishing } = await import('../rtmp/server.js');
-  const { isStudioConnected } = await import('../studio/ingest.js');
-  if (!isRtmpPublishing() && !isStudioConnected()) {
-    throw new Error('No video source is connected. Start OBS or the Web Studio before going live.');
-  }
-
-  // Web Studio's WebSocket opens seconds before its ingest FFmpeg has actually published to the
-  // local RTMP server (spawn + webm probe + encode + RTMP handshake). If we started the fan-out on
-  // the WebSocket alone, every relay leg would fire into an empty input and burn its retry budget
-  // before the encoder is ready — the burst of "exited (code ...) — reconnecting" we used to see
-  // at go-live. So when Studio is connected but not yet publishing, wait for the publish first.
-  // OBS always publishes before the operator can click Go Live, so this is effectively Studio-only.
-  if (!isRtmpPublishing() && isStudioConnected()) {
-    const { waitForCondition } = await import('./waitForCondition.js');
-    const published = await waitForCondition(() => isRtmpPublishing(), { timeoutMs: 15000, intervalMs: 500 });
-    if (!published) {
-      throw new Error('The Web Studio is connected but no video has started flowing yet. Give it a moment and try Go Live again.');
+    // Verify an ingest source is present. Without this we'd mark the stream "live" while nothing
+    // flows — the fan-out would retry then give up, and YouTube would time out after 2 minutes.
+    // isRtmpPublishing() covers OBS (and a fully-warmed Studio ingest); isStudioConnected() covers
+    // a Studio WebSocket whose ingest FFmpeg may still be establishing its RTMP publish.
+    const { isRtmpPublishing } = await import('../rtmp/server.js');
+    const { isStudioConnected } = await import('../studio/ingest.js');
+    if (!isRtmpPublishing() && !isStudioConnected()) {
+      throw new Error('No video source is connected. Start OBS or the Web Studio before going live.');
     }
-  }
 
-  // Update Twitch title at go-live time
-  const twitchPs = platformStreams.find((ps) => ps.platform === 'twitch');
-  if (twitchPs) {
-    try {
-      await updateTwitchChannel(stream.name);
-      logEvent(streamId, 'twitch', 'title_updated', stream.name);
-    } catch (err) {
-      console.warn('[manager] Twitch title update failed:', err);
+    // Web Studio's WebSocket opens seconds before its ingest FFmpeg has actually published to the
+    // local RTMP server (spawn + webm probe + encode + RTMP handshake). If we started the fan-out on
+    // the WebSocket alone, every relay leg would fire into an empty input and burn its retry budget
+    // before the encoder is ready — the burst of "exited (code ...) — reconnecting" we used to see
+    // at go-live. So when Studio is connected but not yet publishing, wait for the publish first.
+    // OBS always publishes before the operator can click Go Live, so this is effectively Studio-only.
+    if (!isRtmpPublishing() && isStudioConnected()) {
+      const { waitForCondition } = await import('./waitForCondition.js');
+      const published = await waitForCondition(() => isRtmpPublishing(), { timeoutMs: 15000, intervalMs: 500 });
+      if (!published) {
+        throw new Error('The Web Studio is connected but no video has started flowing yet. Give it a moment and try Go Live again.');
+      }
     }
-  }
 
-  // Facebook: create the live video now if it was deferred (a scheduled stream). FB no longer
-  // supports API scheduling and its RTMP URL is short-lived, so the live video can only be
-  // created at the moment we actually start streaming. Must run before the fan-out so the
-  // freshly-issued rtmp_url is in place when startFanOut reads it.
-  const fbDeferred = platformStreams.find((ps) => ps.platform === 'facebook' && !ps.broadcast_id);
-  if (fbDeferred) {
-    try {
-      const fb = await createFacebookLiveVideo(stream.name, stream.description);
-      db.prepare("UPDATE platform_streams SET broadcast_id = ?, rtmp_url = ? WHERE id = ?")
-        .run(fb.liveVideoId, fb.streamUrl, fbDeferred.id);
-      fbDeferred.broadcast_id = fb.liveVideoId;
-      fbDeferred.rtmp_url = fb.streamUrl;
-      logEvent(streamId, 'facebook', 'setup_success', `Live video ${fb.liveVideoId} created at go-live`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      db.prepare("UPDATE platform_streams SET status = 'error', error_message = ? WHERE id = ?")
-        .run(msg, fbDeferred.id);
-      // Drop it from this go-live so the fan-out doesn't try to use an empty URL.
-      platformStreams.splice(platformStreams.indexOf(fbDeferred), 1);
-      logEvent(streamId, 'facebook', 'setup_error', msg);
+    // Update Twitch title at go-live time
+    const twitchPs = platformStreams.find((ps) => ps.platform === 'twitch');
+    if (twitchPs) {
+      try {
+        await updateTwitchChannel(stream.name);
+        logEvent(streamId, 'twitch', 'title_updated', stream.name);
+      } catch (err) {
+        console.warn('[manager] Twitch title update failed:', err);
+      }
     }
+
+    // Facebook: create the live video now if it was deferred (a scheduled stream). FB no longer
+    // supports API scheduling and its RTMP URL is short-lived, so the live video can only be
+    // created at the moment we actually start streaming. Must run before the fan-out so the
+    // freshly-issued rtmp_url is in place when startFanOut reads it.
+    const fbDeferred = platformStreams.find((ps) => ps.platform === 'facebook' && !ps.broadcast_id);
+    if (fbDeferred) {
+      try {
+        const fb = await createFacebookLiveVideo(stream.name, stream.description);
+        db.prepare("UPDATE platform_streams SET broadcast_id = ?, rtmp_url = ? WHERE id = ?")
+          .run(fb.liveVideoId, fb.streamUrl, fbDeferred.id);
+        fbDeferred.broadcast_id = fb.liveVideoId;
+        fbDeferred.rtmp_url = fb.streamUrl;
+        logEvent(streamId, 'facebook', 'setup_success', `Live video ${fb.liveVideoId} created at go-live`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        db.prepare("UPDATE platform_streams SET status = 'error', error_message = ? WHERE id = ?")
+          .run(msg, fbDeferred.id);
+        // Drop it from this go-live so the fan-out doesn't try to use an empty URL.
+        platformStreams.splice(platformStreams.indexOf(fbDeferred), 1);
+        logEvent(streamId, 'facebook', 'setup_error', msg);
+      }
+    }
+
+    // Mark stream as live
+    db.prepare('UPDATE streams SET status = ?, started_at = ? WHERE id = ?').run('live', Date.now(), streamId);
+    logEvent(streamId, null, 'go_live', `Starting fan-out to ${platformStreams.length} platforms`);
+
+    // Start FFmpeg fan-out (imported dynamically to avoid circular deps)
+    const { startFanOut } = await import('../fanout/ffmpeg.js');
+    startFanOut(streamId, platformStreams);
+
+    // YouTube transition (async — don't block the response)
+    const ytPs = platformStreams.find((ps) => ps.platform === 'youtube');
+    if (ytPs?.broadcast_id) {
+      const extra = ytPs.extra_json ? JSON.parse(ytPs.extra_json) : {};
+      transitionToLive(ytPs.broadcast_id, extra.stream_id).then(() => {
+        db.prepare("UPDATE platform_streams SET status = 'live' WHERE id = ?").run(ytPs.id);
+        logEvent(streamId, 'youtube', 'transitioned_live');
+      }).catch((err) => {
+        console.error('[manager] YouTube transition failed:', err);
+        logEvent(streamId, 'youtube', 'transition_error', String(err));
+      });
+    }
+
+    // Facebook: an UNPUBLISHED live video must be explicitly transitioned to LIVE_NOW —
+    // streaming RTMP alone leaves it in preview, never visible on the Page. (The fan-out
+    // process sets the DB status to 'live'; this call is what actually publishes it.)
+    const fbPs = platformStreams.find((ps) => ps.platform === 'facebook');
+    if (fbPs?.broadcast_id) {
+      const fbId = fbPs.broadcast_id;
+      // FB only accepts the LIVE_NOW transition once it's receiving the encoder's data, so
+      // wait a few seconds for the fan-out to connect, and retry a couple of times in case
+      // the ingest connection is slow to establish.
+      const publishFb = (attempt = 0): void => {
+        publishFacebookLiveVideo(fbId)
+          .then(() => {
+            logEvent(streamId, 'facebook', 'published_live');
+            // Now that the broadcast is live, post the "we're live now" announcement with its link.
+            void postGoLiveAnnouncement(stream, fbId);
+          })
+          .catch((err) => {
+            if (attempt < 2) {
+              setTimeout(() => publishFb(attempt + 1), 5000);
+            } else {
+              console.error('[manager] Facebook publish failed:', err);
+              logEvent(streamId, 'facebook', 'publish_error', String(err));
+            }
+          });
+      };
+      setTimeout(() => publishFb(), 4000);
+    }
+
+    // Twitch goes live automatically when RTMP connects; the fan-out marks it 'live'.
+  } finally {
+    goLiveInFlight = false;
   }
-
-  // Mark stream as live
-  db.prepare('UPDATE streams SET status = ?, started_at = ? WHERE id = ?').run('live', Date.now(), streamId);
-  logEvent(streamId, null, 'go_live', `Starting fan-out to ${platformStreams.length} platforms`);
-
-  // Start FFmpeg fan-out (imported dynamically to avoid circular deps)
-  const { startFanOut } = await import('../fanout/ffmpeg.js');
-  startFanOut(streamId, platformStreams);
-
-  // YouTube transition (async — don't block the response)
-  const ytPs = platformStreams.find((ps) => ps.platform === 'youtube');
-  if (ytPs?.broadcast_id) {
-    const extra = ytPs.extra_json ? JSON.parse(ytPs.extra_json) : {};
-    transitionToLive(ytPs.broadcast_id, extra.stream_id).then(() => {
-      db.prepare("UPDATE platform_streams SET status = 'live' WHERE id = ?").run(ytPs.id);
-      logEvent(streamId, 'youtube', 'transitioned_live');
-    }).catch((err) => {
-      console.error('[manager] YouTube transition failed:', err);
-      logEvent(streamId, 'youtube', 'transition_error', String(err));
-    });
-  }
-
-  // Facebook: an UNPUBLISHED live video must be explicitly transitioned to LIVE_NOW —
-  // streaming RTMP alone leaves it in preview, never visible on the Page. (The fan-out
-  // process sets the DB status to 'live'; this call is what actually publishes it.)
-  const fbPs = platformStreams.find((ps) => ps.platform === 'facebook');
-  if (fbPs?.broadcast_id) {
-    const fbId = fbPs.broadcast_id;
-    // FB only accepts the LIVE_NOW transition once it's receiving the encoder's data, so
-    // wait a few seconds for the fan-out to connect, and retry a couple of times in case
-    // the ingest connection is slow to establish.
-    const publishFb = (attempt = 0): void => {
-      publishFacebookLiveVideo(fbId)
-        .then(() => {
-          logEvent(streamId, 'facebook', 'published_live');
-          // Now that the broadcast is live, post the "we're live now" announcement with its link.
-          void postGoLiveAnnouncement(stream, fbId);
-        })
-        .catch((err) => {
-          if (attempt < 2) {
-            setTimeout(() => publishFb(attempt + 1), 5000);
-          } else {
-            console.error('[manager] Facebook publish failed:', err);
-            logEvent(streamId, 'facebook', 'publish_error', String(err));
-          }
-        });
-    };
-    setTimeout(() => publishFb(), 4000);
-  }
-
-  // Twitch goes live automatically when RTMP connects; the fan-out marks it 'live'.
 }
 
 /**

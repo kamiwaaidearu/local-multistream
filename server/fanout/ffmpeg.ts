@@ -125,16 +125,17 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
     // RTMP input ended because the source (Studio/OBS) dropped. FFmpeg exits 0 on a clean
     // input EOF, so code 0 is NOT "all done" here.
     const ranMs = Date.now() - proc.startedAt;
+    const sourcePresent = isRtmpPublishing();
     console.warn(`[ffmpeg] ${ps.platform} exited (code ${code}) while stream is live — reconnecting`);
-    // Only persist a disconnect for a leg that had actually been streaming — not the rapid
-    // reconnect probes during an outage (each runs only seconds and would otherwise flood the log).
-    if (ranMs > 15000) logEvent(streamId, ps.platform, 'ffmpeg_disconnected', `Exit code: ${code}`);
+    // Persist a disconnect for a leg that had actually been streaming (a real drop) OR any failure
+    // while the source is present (a per-platform fault worth a paper trail). Suppress only the
+    // rapid source-absent reconnect probes during an outage, which would otherwise flood the log.
+    if (ranMs > 15000 || sourcePresent) logEvent(streamId, ps.platform, 'ffmpeg_disconnected', `Exit code: ${code}`);
 
     // Two failure modes (see retryPolicy): if the local source is gone, the operator's ingest
     // dropped and every leg lost its input — keep retrying so all resume when it returns (the
     // stream watchdog bounds this). If the source is present but this leg keeps dying, it's a
     // per-platform fault — give up and surface an error after a few tries.
-    const sourcePresent = isRtmpPublishing();
     const decision = decideFanoutRetry({ sourcePresent, retryCount, ranMs });
 
     if (decision.giveUp) {
