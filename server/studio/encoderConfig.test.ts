@@ -5,12 +5,14 @@ import {
   pickPreset,
   resolveEncoder,
   buildVideoArgs,
+  buildAudioArgs,
   shouldRuntimeFallback,
   NVENC_PRESETS,
   X264_PRESETS,
   DEFAULT_NVENC_PRESET,
   DEFAULT_X264_PRESET,
   NVENC_RUNTIME_FAIL_WINDOW_MS,
+  INGEST_SAMPLE_RATE,
 } from './encoderConfig.js';
 
 test('the defaults are themselves valid presets', () => {
@@ -155,6 +157,42 @@ test('buildVideoArgs: both encoders pin 30 fps CFR with a 2 s (g=60) keyframe in
     assert.equal(args[args.indexOf('-g') + 1], '60');
     assert.ok(!args.includes('120'));
   }
+});
+
+// --- buildAudioArgs: the exact ffmpeg audio command the ingest emits ---
+
+test('buildAudioArgs: AAC stereo at the pinned sample rate, with the configured bitrate', () => {
+  assert.deepEqual(buildAudioArgs(160), [
+    '-c:a', 'aac',
+    '-b:a', '160k',
+    '-ac', '2',
+    '-ar', '48000',
+    '-af', 'aresample=async=1000:first_pts=0:osr=48000',
+  ]);
+});
+
+test('buildAudioArgs: the configured bitrate flows into -b:a', () => {
+  const args = buildAudioArgs(128);
+  assert.equal(args[args.indexOf('-b:a') + 1], '128k');
+});
+
+test('buildAudioArgs: always downmixes/keeps stereo so the channel count cannot wander', () => {
+  assert.equal(buildAudioArgs(160)[buildAudioArgs(160).indexOf('-ac') + 1], '2');
+});
+
+test('buildAudioArgs: the aresample output rate matches -ar (single resample) and INGEST_SAMPLE_RATE', () => {
+  const args = buildAudioArgs(160);
+  const arRate = args[args.indexOf('-ar') + 1];
+  const filter = args[args.indexOf('-af') + 1];
+  assert.equal(arRate, String(INGEST_SAMPLE_RATE));
+  // osr must equal -ar, else ffmpeg resamples twice (the review finding this guards against).
+  assert.ok(filter.includes(`osr=${arRate}`), `filter "${filter}" should pin osr=${arRate}`);
+});
+
+test('buildAudioArgs: rebuilds the audio clock (async) to hold A/V sync on the jittery live pipe', () => {
+  const filter = buildAudioArgs(160)[buildAudioArgs(160).indexOf('-af') + 1];
+  assert.ok(filter.startsWith('aresample='), 'audio filter must be an aresample chain');
+  assert.ok(filter.includes('async=1000'), 'async compensation must be enabled');
 });
 
 // --- shouldRuntimeFallback: one-time NVENC→libx264 fallback when a built-in encoder fails at runtime ---

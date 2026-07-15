@@ -155,3 +155,31 @@ export function buildVideoArgs(encoder: VideoEncoder, preset: string, videoBitra
     ...fps,
   ];
 }
+
+// The ingest audio output sample rate. Pinned to 48 kHz: the browser AudioContext / Opus source is
+// 48 kHz and the AAC encoder and the aresample filter all target it, so there's at most one resample.
+export const INGEST_SAMPLE_RATE = 48000;
+
+// Build the audio-encoder portion of the ingest ffmpeg args. Mirrors buildVideoArgs — kept here as a
+// pure function so the exact command is unit-testable without spawning ffmpeg or capturing a mic.
+//
+// The source is a LIVE MediaRecorder webm/opus pipe whose sample timestamps jitter (and can go
+// non-monotonic) against the wall clock. Video is pinned to CFR upstream (buildVideoArgs); audio was
+// passed through raw, so its PTS drifted relative to the rigid video clock. Lenient ingests
+// (Facebook/Twitch) hide this, but YouTube re-segments to a reference clock and corrects the
+// accumulated drift by dropping/inserting samples at a steady cadence — heard as a periodic pop
+// (~every 3/4 s). aresample=async rebuilds a continuous, monotonic timeline (stretching/padding with
+// silence) so there are no gaps for YouTube to "fix"; osr pins the rate so the drift compensation and
+// the encode happen in a single resample. -ac 2 keeps the channel count from wandering with the
+// source mix. This runs at ingest, so the copy-only fan-out carries corrected audio to every platform
+// without disturbing the already-good legs.
+export function buildAudioArgs(audioBitrateKbps: number): string[] {
+  const sr = String(INGEST_SAMPLE_RATE);
+  return [
+    '-c:a', 'aac',
+    '-b:a', `${audioBitrateKbps}k`,
+    '-ac', '2',
+    '-ar', sr,
+    '-af', `aresample=async=1000:first_pts=0:osr=${sr}`,
+  ];
+}

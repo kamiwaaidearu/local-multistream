@@ -5,7 +5,7 @@ import { config } from '../config.js';
 import { validateToken } from './auth.js';
 import { isRtmpPublishing } from '../rtmp/server.js';
 import { handleBandwidthProbe } from './bandwidthProbe.js';
-import { resolveEncoder, buildVideoArgs, shouldRuntimeFallback, type VideoEncoder } from './encoderConfig.js';
+import { resolveEncoder, buildVideoArgs, buildAudioArgs, shouldRuntimeFallback, type VideoEncoder } from './encoderConfig.js';
 import { decideStudioConnection } from './sessionTakeover.js';
 
 let ffmpegPath: string;
@@ -124,20 +124,7 @@ function startIngestFfmpeg(): ChildProcess {
     '-probesize', '1000000',
     '-i', 'pipe:0',
     ...buildVideoArgs(encoder, preset, config.studioVideoBitrateKbps),
-    '-c:a', 'aac',
-    '-b:a', `${config.studioAudioBitrateKbps}k`,
-    '-ac', '2',
-    '-ar', '48000',
-    // Rebuild a continuous, monotonic audio clock before encoding. The source is a LIVE
-    // MediaRecorder webm/opus pipe, whose sample timestamps jitter (and can go non-monotonic)
-    // against the wall clock. Video is already pinned to CFR upstream (buildVideoArgs), but audio
-    // was passed through raw — so its PTS drifted relative to the rigid video clock. Lenient
-    // ingests (Facebook/Twitch) hide this; YouTube re-segments to a reference clock and corrects
-    // the accumulated drift by dropping/inserting samples at a steady cadence — heard as a periodic
-    // pop (~every 3/4 s). aresample=async stretches/pads audio (with silence) to hold sync so there
-    // are no gaps for YouTube to "fix". This runs at ingest, so the copy-only fan-out carries the
-    // corrected audio to every platform without disturbing the already-good legs.
-    '-af', 'aresample=async=1000:first_pts=0:osr=48000',
+    ...buildAudioArgs(config.studioAudioBitrateKbps),
     '-f', 'flv',
     rtmpUrl,
   ];
