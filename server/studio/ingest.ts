@@ -137,7 +137,7 @@ function startIngestFfmpeg(): ChildProcess {
     // pop (~every 3/4 s). aresample=async stretches/pads audio (with silence) to hold sync so there
     // are no gaps for YouTube to "fix". This runs at ingest, so the copy-only fan-out carries the
     // corrected audio to every platform without disturbing the already-good legs.
-    '-af', 'aresample=async=1000:first_pts=0',
+    '-af', 'aresample=async=1000:first_pts=0:osr=48000',
     '-f', 'flv',
     rtmpUrl,
   ];
@@ -146,17 +146,30 @@ function startIngestFfmpeg(): ChildProcess {
   const startedAt = Date.now();
   const child = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
 
+  // Timestamp warnings ("Non-monotonous DTS", "timestamp discontinuity", …) are the fingerprint of
+  // the jittery MediaRecorder audio clock behind the YouTube audio-pop issue, so we surface them —
+  // but they can fire per-packet. Throttle them to ~once every 2s with a running count: enough to
+  // confirm on a live stream whether they occur (and that the aresample fix silenced them) without
+  // flooding synchronous console.log on the event loop that also feeds webm into this ingest.
+  let lastTsWarnAt = 0;
+  let tsWarnSuppressed = 0;
   child.stderr?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
-    if (line) {
-      // Log FFmpeg output for debugging (filter noise). Timestamp warnings are included on
-      // purpose: "Non-monotonous DTS", "timestamp discontinuity", etc. are the fingerprint of the
-      // jittery MediaRecorder audio clock behind the YouTube audio-pop issue — surfacing them lets
-      // us confirm the cause (and that the aresample fix above silenced them) on a live stream.
-      if (line.includes('frame=') || line.includes('Error') || line.includes('error') ||
-          line.includes('DTS') || line.includes('PTS') || line.includes('timestamp') ||
-          line.includes('discontinuity')) {
-        console.log(`[studio:ffmpeg] ${line}`);
+    if (!line) return;
+    // Errors and periodic progress lines: log as before (ffmpeg already rate-limits these).
+    if (line.includes('frame=') || line.includes('Error') || line.includes('error')) {
+      console.log(`[studio:ffmpeg] ${line}`);
+      return;
+    }
+    if (line.includes('DTS') || line.includes('PTS') || line.includes('timestamp') || line.includes('discontinuity')) {
+      const now = Date.now();
+      if (now - lastTsWarnAt >= 2000) {
+        const extra = tsWarnSuppressed > 0 ? ` (+${tsWarnSuppressed} more timestamp warnings since last)` : '';
+        console.log(`[studio:ffmpeg] ${line}${extra}`);
+        lastTsWarnAt = now;
+        tsWarnSuppressed = 0;
+      } else {
+        tsWarnSuppressed++;
       }
     }
   });
