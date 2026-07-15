@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { nextReconnectStep, MAX_RECONNECT_ATTEMPTS, RECONNECT_BACKOFF_MS } from './studioReconnect';
+import { nextReconnectStep, isFatalCloseCode, MAX_RECONNECT_ATTEMPTS, RECONNECT_BACKOFF_MS } from './studioReconnect';
 
 describe('nextReconnectStep', () => {
   it('follows the backoff schedule for the early attempts', () => {
@@ -24,5 +24,26 @@ describe('nextReconnectStep', () => {
   it('clamps the delay to the last backoff entry for out-of-range attempts', () => {
     const capped = RECONNECT_BACKOFF_MS[RECONNECT_BACKOFF_MS.length - 1];
     expect(nextReconnectStep(RECONNECT_BACKOFF_MS.length + 3, true).delayMs).toBe(capped);
+  });
+});
+
+describe('isFatalCloseCode', () => {
+  it('always treats OBS-conflict (4001) and takeover (4004) as fatal', () => {
+    for (const live of [true, false]) {
+      expect(isFatalCloseCode(4001, live)).toBe(true);
+      expect(isFatalCloseCode(4004, live)).toBe(true);
+    }
+  });
+
+  it('treats 4000 as fatal pre-live but retryable while live (may be our own stale socket)', () => {
+    expect(isFatalCloseCode(4000, false)).toBe(true);  // pre-live: a real conflict, give up
+    expect(isFatalCloseCode(4000, true)).toBe(false);  // live: retry so the takeover can succeed
+  });
+
+  it('never treats an ordinary drop or the ingest-restart bounce (4003) as fatal', () => {
+    for (const code of [1000, 1006, 4003]) {
+      expect(isFatalCloseCode(code, true)).toBe(false);
+      expect(isFatalCloseCode(code, false)).toBe(false);
+    }
   });
 });

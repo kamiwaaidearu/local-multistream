@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { wsUrl } from '../lib/ws';
 import { QUALITY_PRESETS, DEFAULT_QUALITY } from '../lib/bandwidthProbe';
-import { nextReconnectStep } from '../lib/studioReconnect';
+import { nextReconnectStep, isFatalCloseCode } from '../lib/studioReconnect';
 import { getAuthToken } from '../lib/authToken';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -178,9 +178,10 @@ export function useStudioStream({
       teardownSocket();
       wsRef.current = null;
 
-      // Fatal: another studio session is active (4000) or took over this one (4004), or OBS is
-      // publishing (4001). Don't reconnect — retrying would just fight the other session.
-      if (e.code === 4000 || e.code === 4001 || e.code === 4004) {
+      // Don't reconnect on codes that mean another owner holds the slot (see isFatalCloseCode).
+      // Notably 4000 is retryable while live — it may be our own stale socket, and the next attempt
+      // takes it over once the server's staleness window elapses.
+      if (isFatalCloseCode(e.code, keepReconnectingRef.current)) {
         shouldReconnectRef.current = false;
         fatalRef.current = true;
         setError(e.reason || 'Studio session was rejected');

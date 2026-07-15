@@ -59,6 +59,17 @@ export function stopSourceWatchdog(): void {
 }
 
 async function tick(): Promise<void> {
+  // Wrap the whole body: this runs from setInterval, so an unhandled throw here would surface as an
+  // unhandled promise rejection (which can terminate the process on modern Node). Never let the
+  // watchdog take the server down.
+  try {
+    await runTick();
+  } catch (err) {
+    console.error('[watchdog] tick failed:', err);
+  }
+}
+
+async function runTick(): Promise<void> {
   const db = getDb();
   const live = db.prepare("SELECT id FROM streams WHERE status = 'live'").all() as Array<{ id: string }>;
   const liveIds = new Set(live.map((s) => s.id));
