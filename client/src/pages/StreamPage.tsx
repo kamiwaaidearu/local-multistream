@@ -228,24 +228,12 @@ export function StreamPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [studioStatus]);
 
-  // Auto-reconnect the Web Studio transport after a reload/reopen mid-broadcast. When this tab
-  // mounts into an already-live stream, the studio WebSocket is down (a fresh page has no live
-  // socket) yet the broadcast is still up on the platforms. Re-establish it automatically so the
-  // operator doesn't have to notice and click Reconnect — the composite canvas keeps rendering the
-  // branded template, so the platforms get a "standby" frame instead of a frozen feed even before
-  // camera/mic are re-enabled. One-shot per mount; skipped for OBS-sourced streams (this tab isn't
-  // their source, and the server would reject a second publisher anyway). The manual Reconnect
-  // banner remains as the fallback if this attempt fails.
-  const autoReconnectedRef = useRef(false);
-  useEffect(() => {
-    if (autoReconnectedRef.current) return;
-    if (stream?.status !== 'live' || mode !== 'studio' || studioStatus !== 'disconnected') return;
-    autoReconnectedRef.current = true;
-    // The async round-trip also gives the Studio panel's effect time to publish studioConnectRef.
-    api.getSourceStatus()
-      .then((s) => { if (s.source !== 'obs') studioConnectRef.current?.(); })
-      .catch(() => { studioConnectRef.current?.(); });
-  }, [stream?.status, mode, studioStatus]);
+  // NB: a reopened tab does NOT auto-reconnect. A page reload destroys the camera/slide streams
+  // (screen-share can only be re-granted by a fresh user gesture), so auto-connecting would push an
+  // empty, content-less frame to viewers before the operator is ready. Instead the "Studio source
+  // disconnected" banner prompts them to re-share slides + camera and reconnect deliberately.
+  // (The tab-stays-open network-drop case is different — media is still in memory there, so the
+  // hook's own persistent reconnect resumes real content automatically; see keepReconnecting.)
 
   // Derive effective source connected for studio mode from local hook status
   const effectiveSourceConnected = mode === 'studio'
@@ -482,8 +470,9 @@ export function StreamPage() {
           <Stack gap="xs">
             <Text size="sm">
               This tab lost its connection to the broadcast — likely from closing or reloading it.
-              The stream is still live on the platforms and we try to reconnect automatically. If it
-              doesn't come back on its own, re-enable your camera/mic below if needed, then reconnect.
+              The stream is still live on the platforms. Re-share your slides and turn your
+              camera/mic back on below, then click Reconnect to resume — the broadcast waits a few
+              minutes for you before it ends on its own.
             </Text>
             <Group>
               <Button size="xs" color="orange" onClick={() => studioConnectRef.current?.()}>
