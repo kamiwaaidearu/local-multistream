@@ -122,6 +122,18 @@ async function start(): Promise<void> {
     console.warn('[ffmpeg] ffmpeg-static not available. FFmpeg is required for go-live.');
   }
 
+  // Resolve the video encoder now, at boot. detectNvenc() runs a SYNCHRONOUS `ffmpeg -encoders` probe,
+  // and it's lazy — so without this the first caller pays for it. In OBS mode the Web Studio ingest
+  // never runs, which makes that first caller the transcoding Facebook leg being spawned from goLive,
+  // blocking the event loop mid-go-live (up to the probe's 10s timeout). Warming it here moves that
+  // cost to startup, where stalling briefly is harmless.
+  try {
+    const { activeEncoder } = await import('./studio/ingest.js');
+    activeEncoder();
+  } catch (err) {
+    console.warn('[server] Could not pre-resolve the video encoder:', err instanceof Error ? err.message : err);
+  }
+
   // Start RTMP server
   const { startRtmpServer } = await import('./rtmp/server.js');
   startRtmpServer();

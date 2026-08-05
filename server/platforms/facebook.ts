@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { getFacebookPageToken } from '../auth/facebook.js';
+import { httpTimeout } from '../httpTimeout.js';
 
 const API = `https://graph.facebook.com/${config.fbApiVersion}`;
 
@@ -44,6 +45,7 @@ export async function createFacebookLiveVideo(
   if (description) body.description = description;
 
   const res = await fetch(`${API}/${pageId}/live_videos`, {
+    signal: httpTimeout(),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -77,7 +79,7 @@ export async function resolveFacebookVideoId(liveVideoId: string): Promise<strin
   const { accessToken } = getPageAuth();
 
   const params = new URLSearchParams({ fields: 'video{id},permalink_url', access_token: accessToken });
-  const res = await fetch(`${API}/${liveVideoId}?${params}`);
+  const res = await fetch(`${API}/${liveVideoId}?${params}`, { signal: httpTimeout() });
   if (!res.ok) {
     console.warn(`[facebook] Could not resolve video id for live video ${liveVideoId}: ${await errorMessage(res)}`);
     return null;
@@ -140,7 +142,7 @@ export async function getFacebookIngestHealth(liveVideoId: string): Promise<Face
       fields: 'status,ingest_streams{is_master,stream_health}',
       access_token: getPageAuth().accessToken,
     });
-    const res = await fetch(`${API}/${liveVideoId}?${params}`);
+    const res = await fetch(`${API}/${liveVideoId}?${params}`, { signal: httpTimeout() });
     if (!res.ok) return unknown(await errorMessage(res));
     data = await res.json();
   } catch (err) {
@@ -184,6 +186,7 @@ export async function publishFacebookLiveVideo(liveVideoId: string): Promise<voi
   const { accessToken } = getPageAuth();
 
   const res = await fetch(`${API}/${liveVideoId}`, {
+    signal: httpTimeout(),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status: 'LIVE_NOW', access_token: accessToken }),
@@ -201,6 +204,7 @@ export async function endFacebookLiveVideo(liveVideoId: string): Promise<void> {
   const { accessToken } = getPageAuth();
 
   const res = await fetch(`${API}/${liveVideoId}`, {
+    signal: httpTimeout(),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -229,6 +233,7 @@ export async function updateFacebookLiveVideo(
   if (description !== undefined) body.description = description;
 
   const res = await fetch(`${API}/${liveVideoId}`, {
+    signal: httpTimeout(),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -246,6 +251,7 @@ export async function deleteFacebookLiveVideo(liveVideoId: string): Promise<void
   const { accessToken } = getPageAuth();
 
   const res = await fetch(`${API}/${liveVideoId}?access_token=${accessToken}`, {
+    signal: httpTimeout(),
     method: 'DELETE',
   });
 
@@ -273,7 +279,7 @@ export async function createScheduledPagePost(
     access_token: accessToken,
   });
 
-  const res = await fetch(`${API}/${pageId}/feed`, { method: 'POST', body: params });
+  const res = await fetch(`${API}/${pageId}/feed`, { method: 'POST', body: params, signal: httpTimeout() });
   if (!res.ok) {
     throw new Error(`Facebook scheduled post failed: ${await errorMessage(res)}`);
   }
@@ -287,7 +293,7 @@ export async function createPagePost(message: string): Promise<string> {
   const { accessToken, pageId } = getPageAuth();
 
   const params = new URLSearchParams({ message, access_token: accessToken });
-  const res = await fetch(`${API}/${pageId}/feed`, { method: 'POST', body: params });
+  const res = await fetch(`${API}/${pageId}/feed`, { method: 'POST', body: params, signal: httpTimeout() });
   if (!res.ok) {
     throw new Error(`Facebook post failed: ${await errorMessage(res)}`);
   }
@@ -301,6 +307,7 @@ export async function deletePagePost(postId: string): Promise<void> {
   const { accessToken } = getPageAuth();
 
   const res = await fetch(`${API}/${postId}?access_token=${encodeURIComponent(accessToken)}`, {
+    signal: httpTimeout(),
     method: 'DELETE',
   });
 

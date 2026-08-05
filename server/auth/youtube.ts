@@ -2,6 +2,7 @@ import { google } from 'googleapis';
 import { config } from '../config.js';
 import { getDb } from '../db/index.js';
 import { type AuthProbe, indeterminate, rejected, statusIsAuthoritative, VALID } from './authProbe.js';
+import { httpTimeout } from '../httpTimeout.js';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube',
@@ -111,6 +112,9 @@ export async function refreshYouTubeAccessToken(): Promise<AuthProbe> {
 
   try {
     const res = await fetch('https://oauth2.googleapis.com/token', {
+      // Without this, a hung token endpoint stalls goLive's auth pre-flight forever while
+      // goLiveInFlight stays set — the operator then cannot start the broadcast at all.
+      signal: httpTimeout(),
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({

@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { getDb } from '../db/index.js';
 import { type AuthProbe, indeterminate, rejected, VALID } from './authProbe.js';
+import { httpTimeout } from '../httpTimeout.js';
 
 const SCOPES = ['channel:manage:broadcast', 'channel:read:stream_key'];
 
@@ -18,6 +19,7 @@ export function getTwitchAuthUrl(state: string): string {
 export async function handleTwitchCallback(code: string): Promise<void> {
   // Exchange code for tokens
   const tokenRes = await fetch('https://id.twitch.tv/oauth2/token', {
+    signal: httpTimeout(),
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -42,6 +44,7 @@ export async function handleTwitchCallback(code: string): Promise<void> {
 
   // Fetch broadcaster ID
   const userRes = await fetch('https://api.twitch.tv/helix/users', {
+    signal: httpTimeout(),
     headers: {
       'Authorization': `Bearer ${tokens.access_token}`,
       'Client-Id': config.twitch.clientId,
@@ -54,6 +57,7 @@ export async function handleTwitchCallback(code: string): Promise<void> {
 
   // Fetch stream key
   const keyRes = await fetch(`https://api.twitch.tv/helix/streams/key?broadcaster_id=${user.id}`, {
+    signal: httpTimeout(),
     headers: {
       'Authorization': `Bearer ${tokens.access_token}`,
       'Client-Id': config.twitch.clientId,
@@ -99,6 +103,7 @@ export async function refreshTwitchToken(): Promise<string | null> {
   }
 
   const res = await fetch('https://id.twitch.tv/oauth2/token', {
+    signal: httpTimeout(),
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -141,6 +146,7 @@ export async function fetchTwitchStreamKey(): Promise<string | null> {
   const accessToken = await refreshTwitchToken() ?? cred.access_token;
 
   const res = await fetch(`https://api.twitch.tv/helix/streams/key?broadcaster_id=${extra.broadcaster_id}`, {
+    signal: httpTimeout(),
     headers: {
       'Authorization': `Bearer ${accessToken}`,
       'Client-Id': config.twitch.clientId,

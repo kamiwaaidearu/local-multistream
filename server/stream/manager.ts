@@ -525,7 +525,12 @@ export async function goLive(streamId: string, opts: { force?: boolean } = {}): 
     const ytPs = platformStreams.find((ps) => ps.platform === 'youtube');
     if (ytPs?.broadcast_id) {
       const extra = ytPs.extra_json ? JSON.parse(ytPs.extra_json) : {};
-      void transitionYouTubeWithRetry(streamId, ytPs, extra.stream_id);
+      // Attributed catch: a bare `void` would surface a DB failure here as an anonymous unhandled
+      // rejection with no stream, platform, or event_log trace.
+      void transitionYouTubeWithRetry(streamId, ytPs, extra.stream_id).catch((err) => {
+        console.error('[manager] YouTube transition handler crashed:', err);
+        logEvent(streamId, 'youtube', 'transition_error', `Handler crashed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
 
     // Facebook: an UNPUBLISHED live video must be explicitly transitioned to LIVE_NOW —
@@ -533,7 +538,10 @@ export async function goLive(streamId: string, opts: { force?: boolean } = {}): 
     // process sets the DB status to 'live'; this call is what actually publishes it.)
     const fbPs = platformStreams.find((ps) => ps.platform === 'facebook');
     if (fbPs?.broadcast_id) {
-      void publishFacebookOnceReceiving(streamId, stream, fbPs);
+      void publishFacebookAndAnnounce(streamId, stream, fbPs).catch((err) => {
+        console.error('[manager] Facebook publish handler crashed:', err);
+        logEvent(streamId, 'facebook', 'publish_error', `Handler crashed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
 
     // Twitch goes live automatically when RTMP connects; the fan-out marks it 'live'.
@@ -583,51 +591,45 @@ async function transitionYouTubeWithRetry(streamId: string, ytPs: PlatformStream
 }
 
 /**
- * Publish the Facebook live video — but only once Facebook confirms it is actually receiving video,
- * and only announce it publicly if that confirmation arrived.
+ * Publish the Facebook live video promptly, then announce it ONLY once Facebook confirms it is really
+ * receiving video.
  *
- * This replaces a blind `setTimeout(publish, 4000)`. That timer assumed FB would reject LIVE_NOW
- * unless data was flowing; it doesn't. On 2026-08-05 the publish returned 200 for a stream FB never
- * ingested, we posted the announcement 3 seconds later, and followers got a link to a 0:00 video.
+ * The harm on 2026-08-05 was not the publish — it was the announcement. `publishFacebookLiveVideo`
+ * returned 200 for a stream Facebook never ingested (the old blind `setTimeout(publish, 4000)` assumed
+ * FB would reject LIVE_NOW without data; it doesn't), and we posted a link to that 0:00 video three
+ * seconds later. So the two steps are deliberately decoupled:
  *
- * On timeout we still publish — going live is what the operator asked for, and a broken health probe
- * must never be the reason we stay dark — but we suppress the announcement and record it loudly, so
- * the worst case is a quiet broken stream rather than a publicly advertised one.
+ *   publish  — on the same ~4s timer as before, so going live is never delayed or blocked by a health
+ *              probe. An earlier revision gated the publish itself on stream_health, which meant a slow
+ *              or hung Graph API could stop the broadcast becoming visible at all — strictly worse than
+ *              the bug it was fixing.
+ *   announce — only after Facebook itself reports a non-zero ingest bitrate. If that never arrives, the
+ *              stream is live but unadvertised, and the health monitor alarms.
  */
-async function publishFacebookOnceReceiving(streamId: string, stream: Stream, fbPs: PlatformStream): Promise<void> {
+async function publishFacebookAndAnnounce(streamId: string, stream: Stream, fbPs: PlatformStream): Promise<void> {
   const fbId = fbPs.broadcast_id!;
+  const describe = (detail: Partial<{ videoKbps: number | null }>) =>
+    detail.videoKbps != null ? `${detail.videoKbps} kbps` : 'bitrate unknown';
 
-  // The ingest is live as soon as the fan-out pushes RTMP; LIVE_NOW only controls visibility. So
-  // stream_health is readable while the video is still UNPUBLISHED, which is what makes this order
-  // (confirm ingest → publish → announce) possible.
-  const { receiving, detail } = await waitForPlatformReceiving(fbPs, { timeoutMs: 45_000 });
-  const bitrate = detail.videoKbps != null ? `${detail.videoKbps} kbps` : 'bitrate unknown';
-
-  // A test stream deliberately stops here. An UNPUBLISHED live video is, per the Live Video API, "not
-  // visible to other users" — so leaving it unpublished gives a complete rehearsal of the encode,
-  // fan-out and stream_health path with nothing whatsoever appearing on the Page.
+  // A test stream is never published. Still confirm ingest, so a dry run genuinely exercises the
+  // stream_health path — that's most of the point of rehearsing.
   if (!mayPublishToFacebook(stream.is_test, 'publish_live_now')) {
+    const { receiving, detail } = await waitForPlatformReceiving(fbPs, { timeoutMs: 45_000 });
     logEvent(streamId, 'facebook', receiving ? 'test_ingest_confirmed' : 'test_ingest_unconfirmed',
-      `TEST stream — leaving the live video unpublished (${receiving ? `receiving, ${bitrate}` : 'no ingest reported'})`);
-    console.log(`[manager] TEST stream — Facebook left unpublished. Ingest ${receiving ? `confirmed (${bitrate})` : 'NOT confirmed'}`);
+      `TEST stream — leaving the live video unpublished (${receiving ? `receiving, ${describe(detail)}` : 'no ingest reported'})`);
+    console.log(`[manager] TEST stream — Facebook left unpublished. Ingest ${receiving ? `confirmed (${describe(detail)})` : 'NOT confirmed'}`);
     return;
   }
 
-  if (receiving) {
-    logEvent(streamId, 'facebook', 'ingest_confirmed', `Facebook is receiving video (${bitrate})`);
-  } else {
-    console.error('[manager] Facebook never confirmed it was receiving video — publishing without announcing');
-    logEvent(streamId, 'facebook', 'ingest_unconfirmed',
-      'Facebook did not report an incoming stream within 45s — publishing anyway, suppressing the announcement post');
-  }
+  // Give the fan-out leg a moment to establish, then publish — same latency as before this change.
+  await new Promise((r) => setTimeout(r, 4000));
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  let published = false;
+  for (let attempt = 0; attempt < 3 && !published; attempt++) {
     try {
       await publishFacebookLiveVideo(fbId);
-      logEvent(streamId, 'facebook', receiving ? 'published_live' : 'published_live_unconfirmed');
-      // Only tell the world when Facebook told US it has the video.
-      if (receiving) void postGoLiveAnnouncement(stream, fbId);
-      return;
+      published = true;
+      logEvent(streamId, 'facebook', 'published_live');
     } catch (err) {
       if (attempt === 2) {
         console.error('[manager] Facebook publish failed:', err);
@@ -637,6 +639,22 @@ async function publishFacebookOnceReceiving(streamId: string, stream: Stream, fb
       await new Promise((r) => setTimeout(r, 5000));
     }
   }
+
+  // Now — and only now — decide whether to tell anyone about it.
+  const { receiving, detail } = await waitForPlatformReceiving(fbPs, { timeoutMs: 45_000 });
+  if (receiving) {
+    logEvent(streamId, 'facebook', 'ingest_confirmed', `Facebook is receiving video (${describe(detail)})`);
+    void postGoLiveAnnouncement(stream, fbId).catch((err) => {
+      console.error('[manager] Facebook go-live post failed:', err);
+      logEvent(streamId, 'facebook', 'golive_post_error', String(err));
+    });
+    return;
+  }
+
+  console.error('[manager] Facebook never confirmed it was receiving video — announcement suppressed');
+  logEvent(streamId, 'facebook', 'ingest_unconfirmed',
+    'Facebook did not report an incoming stream within 45s of publishing — announcement post suppressed. ' +
+    'The broadcast is live but may be showing nothing; check the health panel.');
 }
 
 /**

@@ -24,6 +24,17 @@ const POLL_INTERVAL_MS = 20_000;
  *  this module free of encoder concerns; both cite the same Live API spec. */
 const FACEBOOK_MAX_KBPS = 4000;
 
+/**
+ * Headroom before we call Facebook's measured bitrate "too high".
+ *
+ * The fan-out now transcodes the Facebook leg to exactly FACEBOOK_MAX_KBPS, and stream_health measures
+ * the real muxed rate — which sits a little above the video target because of FLV/container overhead
+ * and CBR variance. Warning on `> 4000` would therefore fire on every single poll of a correctly
+ * configured stream, flapping the state to 'degraded' and crying wolf. 15% is comfortably above normal
+ * overhead while still catching a genuinely mis-set bitrate.
+ */
+const FACEBOOK_BITRATE_WARN_KBPS = Math.round(FACEBOOK_MAX_KBPS * 1.15);
+
 export interface PlatformHealth {
   state: HealthState;
   reason: string;
@@ -48,6 +59,18 @@ interface Tracked extends HealthCounters {
 interface Monitor {
   timer: NodeJS.Timeout;
   platforms: Map<Platform, Tracked>;
+  /**
+   * Guards against overlapping polls. setInterval fires on a fixed schedule regardless of whether the
+   * previous run finished, and a poll makes several HTTP calls — so a slow platform can push one run
+   * past the interval. Two concurrent runs would each read the same counters, both conclude the
+   * restart threshold was crossed, and both restart the same leg: the second kill/respawn would
+   * destroy the leg the first had just started, while the restart budget is corrupted by the
+   * last-write-wins update.
+   */
+  polling: boolean;
+  /** Consecutive skipped ticks, so a permanently-slow platform gets reported rather than silently
+   *  halving the effective poll rate. */
+  skipped: number;
 }
 
 const monitors = new Map<string, Monitor>();
@@ -67,7 +90,9 @@ async function sample(ps: PlatformStream): Promise<{ sample: HealthSample; detai
     const h = await getFacebookIngestHealth(ps.broadcast_id);
     const warnings: string[] = [];
     // Facebook's documented ceilings; exceeding them is a real risk of it refusing to produce video.
-    if (h.videoKbps !== null && h.videoKbps > FACEBOOK_MAX_KBPS) warnings.push(`videoBitrateHigh (${h.videoKbps} kbps > ${FACEBOOK_MAX_KBPS})`);
+    if (h.videoKbps !== null && h.videoKbps > FACEBOOK_BITRATE_WARN_KBPS) {
+      warnings.push(`videoBitrateHigh (${h.videoKbps} kbps — Facebook's limit is ${FACEBOOK_MAX_KBPS})`);
+    }
     if (h.gopMs !== null && h.gopMs > 2000) warnings.push(`keyframeIntervalTooLong (${h.gopMs} ms > 2000)`);
     return {
       sample: { receiving: h.receiving, probeFailed: h.error !== null, warnings },
@@ -171,11 +196,23 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
 export function startHealthMonitor(streamId: string): void {
   if (monitors.has(streamId)) return;
 
-  const monitor = { platforms: new Map() } as Monitor;
+  const monitor = { platforms: new Map(), polling: false, skipped: 0 } as Monitor;
   monitor.timer = setInterval(() => {
-    void pollOnce(streamId, monitor).catch((err) => {
-      console.warn('[health] Poll failed:', err instanceof Error ? err.message : err);
-    });
+    // Never run two polls at once — see Monitor.polling.
+    if (monitor.polling) {
+      monitor.skipped++;
+      if (monitor.skipped === 1 || monitor.skipped % 5 === 0) {
+        console.warn(`[health] Previous poll still running — skipped ${monitor.skipped} tick(s); a platform API is slow`);
+      }
+      return;
+    }
+    monitor.polling = true;
+    monitor.skipped = 0;
+    void pollOnce(streamId, monitor)
+      .catch((err) => {
+        console.warn('[health] Poll failed:', err instanceof Error ? err.message : err);
+      })
+      .finally(() => { monitor.polling = false; });
   }, POLL_INTERVAL_MS);
 
   monitors.set(streamId, monitor);

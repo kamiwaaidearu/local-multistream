@@ -20,7 +20,7 @@ import {
   Alert,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { api, ApiError } from '../lib/api';
+import { api, ApiError, type PlatformIngestHealth } from '../lib/api';
 import { reconnectPlatform } from '../lib/reauth';
 import { useSSE } from '../hooks/useSSE';
 import { useStudioLive, isIntentionalExit } from '../lib/studioLive';
@@ -222,6 +222,23 @@ export function StreamPage() {
     const interval = setInterval(refreshStream, 5000);
     return () => clearInterval(interval);
   }, [stream?.status, refreshStream]);
+
+  // Poll per-platform INGEST health while live. This is the platform's own answer to "are you actually
+  // receiving video", which is a different question from whether our ffmpeg leg is alive — and the one
+  // nobody could answer during the 2026-08-05 broadcast. The server polls the platforms every 20s, so
+  // 10s here is enough to surface a change promptly without adding load.
+  const [health, setHealth] = useState<Record<string, PlatformIngestHealth>>({});
+  useEffect(() => {
+    if (stream?.status !== 'live' || !stream?.id) {
+      setHealth({});
+      return;
+    }
+    const streamId = stream.id;
+    const check = () => api.getStreamHealth(streamId).then(setHealth).catch(() => { /* transient */ });
+    check();
+    const interval = setInterval(check, 10000);
+    return () => clearInterval(interval);
+  }, [stream?.status, stream?.id]);
 
   // When studio connects and we have a pending go-live, trigger it
   useEffect(() => {
@@ -609,6 +626,7 @@ export function StreamPage() {
         onRetryLive={(platform) => handleAction(`retrylive-${platform}`, () => api.retryPlatformLive(stream.id, platform))}
         reconnectingPlatform={reconnecting}
         retryingLivePlatform={retryingLivePlatform}
+        health={health}
       />
       <EventLogCard events={stream.events} />
       {isLive && <FFmpegLog events={sseEvents} connected={sseConnected} />}

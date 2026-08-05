@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { getDb } from '../db/index.js';
 import { type AuthProbe, indeterminate, rejected, statusIsAuthoritative, VALID } from './authProbe.js';
+import { httpTimeout } from '../httpTimeout.js';
 
 // publish_video: create/manage (incl. live) videos on the Page
 // pages_show_list: enumerate the user's Pages (needed to populate the Page picker)
@@ -32,6 +33,7 @@ export async function handleFacebookCallback(code: string): Promise<void> {
 
   const tokenRes = await fetch(
     `https://graph.facebook.com/${config.fbApiVersion}/oauth/access_token?${tokenParams}`,
+    { signal: httpTimeout() },
   );
   if (!tokenRes.ok) {
     const err = await tokenRes.json();
@@ -49,6 +51,7 @@ export async function handleFacebookCallback(code: string): Promise<void> {
 
   const llRes = await fetch(
     `https://graph.facebook.com/${config.fbApiVersion}/oauth/access_token?${llParams}`,
+    { signal: httpTimeout() },
   );
   if (!llRes.ok) {
     const err = await llRes.json();
@@ -75,7 +78,7 @@ export async function getFacebookPages(): Promise<Array<{ id: string; name: stri
   const API = `https://graph.facebook.com/${config.fbApiVersion}`;
 
   // Classic apps: /me/accounts lists the user's managed Pages with their access tokens.
-  const accRes = await fetch(`${API}/me/accounts?fields=id,name,access_token&access_token=${userToken}`);
+  const accRes = await fetch(`${API}/me/accounts?fields=id,name,access_token&access_token=${userToken}`, { signal: httpTimeout() });
   if (accRes.ok) {
     const body = await accRes.json() as { data?: Array<{ id: string; name: string; access_token: string }> };
     if (body.data && body.data.length > 0) return body.data;
@@ -86,7 +89,7 @@ export async function getFacebookPages(): Promise<Array<{ id: string; name: stri
   // granular_scopes — resolve each to a Page access token directly. (debug_token needs an
   // app access token.)
   const appToken = `${config.facebook.appId}|${config.facebook.appSecret}`;
-  const dbgRes = await fetch(`${API}/debug_token?input_token=${userToken}&access_token=${appToken}`);
+  const dbgRes = await fetch(`${API}/debug_token?input_token=${userToken}&access_token=${appToken}`, { signal: httpTimeout() });
   if (!dbgRes.ok) throw new Error('Failed to inspect Facebook token');
   const dbg = await dbgRes.json() as {
     data?: { granular_scopes?: Array<{ scope: string; target_ids?: string[] }> };
@@ -99,7 +102,7 @@ export async function getFacebookPages(): Promise<Array<{ id: string; name: stri
 
   const pages: Array<{ id: string; name: string; access_token: string }> = [];
   for (const id of ids) {
-    const pRes = await fetch(`${API}/${id}?fields=name,access_token&access_token=${userToken}`);
+    const pRes = await fetch(`${API}/${id}?fields=name,access_token&access_token=${userToken}`, { signal: httpTimeout() });
     if (!pRes.ok) continue;
     const p = await pRes.json() as { id: string; name?: string; access_token?: string };
     if (p.access_token) pages.push({ id: p.id, name: p.name ?? id, access_token: p.access_token });
@@ -149,7 +152,7 @@ export async function getFacebookPageUrl(): Promise<string | null> {
   const fallback = `https://www.facebook.com/${extra.page_id}`;
   try {
     const API = `https://graph.facebook.com/${config.fbApiVersion}`;
-    const res = await fetch(`${API}/${extra.page_id}?fields=username,link&access_token=${encodeURIComponent(cred.access_token)}`);
+    const res = await fetch(`${API}/${extra.page_id}?fields=username,link&access_token=${encodeURIComponent(cred.access_token)}`, { signal: httpTimeout() });
     if (res.ok) {
       const data = await res.json() as { username?: string; link?: string };
       const url = data.username ? `https://www.facebook.com/${data.username}` : (data.link ?? fallback);
@@ -184,8 +187,11 @@ export async function probeFacebookAuth(): Promise<AuthProbe> {
   if (!tok) return rejected('No Facebook page is connected');
   try {
     const appToken = `${config.facebook.appId}|${config.facebook.appSecret}`;
+    // Timeout is essential here: this probe sits on goLive's auth pre-flight, so a hung Graph API
+    // would otherwise stall go-live indefinitely with goLiveInFlight stuck set.
     const res = await fetch(
       `https://graph.facebook.com/${config.fbApiVersion}/debug_token?input_token=${encodeURIComponent(tok.accessToken)}&access_token=${encodeURIComponent(appToken)}`,
+      { signal: httpTimeout() },
     );
     if (!res.ok) {
       // A 4xx is Facebook rejecting the token; a 5xx is Facebook being unwell and says nothing about
