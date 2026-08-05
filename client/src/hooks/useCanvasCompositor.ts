@@ -272,9 +272,39 @@ export function useCanvasCompositor({
         ),
       ),
     );
+    // One-shot diagnostics: if the canvas pipeline is dead, this is the only place that knows.
+    console.log(
+      `[studio] Compositor started: canvas ${canvas.width}x${canvas.height}, ` +
+      `track=${videoTrack ? videoTrack.readyState : 'MISSING'}, ` +
+      `requestFrame=${typeof videoTrack?.requestFrame}, ${fps}fps`,
+    );
+    let renderErrLogged = false;
+    let frameErrLogged = false;
+
     ticker.onmessage = () => {
-      renderFrame();
-      try { videoTrack?.requestFrame(); } catch { /* ignore */ }
+      // renderFrame() used to run bare, ahead of requestFrame(). A single throwing cell — a malformed
+      // template, a failed image — would therefore stop frame production entirely and permanently, with
+      // no error surfaced and no video reaching any platform. One bad cell must never take the
+      // broadcast down: log it once and keep emitting frames regardless.
+      try {
+        renderFrame();
+      } catch (err) {
+        if (!renderErrLogged) {
+          renderErrLogged = true;
+          console.error('[studio] renderFrame() threw — drawing may be incomplete, still sending frames:', err);
+        }
+      }
+      try {
+        videoTrack?.requestFrame();
+      } catch (err) {
+        // Previously swallowed silently. If this fails the canvas emits NOTHING — MediaRecorder yields
+        // no chunks, the ingest blocks on empty stdin, and go-live fails with an unrelated-sounding
+        // message. It's the single most important error in the studio, so it must be visible.
+        if (!frameErrLogged) {
+          frameErrLogged = true;
+          console.error('[studio] requestFrame() FAILED — the canvas is producing no frames:', err);
+        }
+      }
     };
     ticker.postMessage({ interval: frameInterval });
 
