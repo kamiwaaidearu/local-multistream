@@ -90,6 +90,26 @@ function getVodUrl(ps: PlatformStream): string | null {
   }
 }
 
+/**
+ * Direct links to what a platform is showing right now, stored at go-live (see storeWatchUrls).
+ *
+ * `watch` is the destination itself; `control` is YouTube's Live Control Room, which reports YouTube's
+ * own bitrate and health verdict. Indispensable on a TEST stream, where YouTube is private and Facebook
+ * is unpublished — neither appears anywhere browsable, so the direct permalink is the only way to look.
+ */
+function getWatchUrls(ps: PlatformStream): { watch: string | null; control: string | null } {
+  if (!ps.extra_json) return { watch: null, control: null };
+  try {
+    const extra = JSON.parse(ps.extra_json);
+    return { watch: extra.watch_url ?? null, control: extra.control_url ?? null };
+  } catch {
+    return { watch: null, control: null };
+  }
+}
+
+const platformColor = (platform: string) =>
+  platform === 'youtube' ? 'red' : platform === 'facebook' ? 'blue' : 'violet';
+
 export function StreamPage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -437,6 +457,46 @@ export function StreamPage() {
             {' '}({new Date(stream.started_at).toLocaleTimeString()} - {new Date(stream.ended_at).toLocaleTimeString()})
           </Text>
         )}
+        {/* Live destination links. Shown for test and real broadcasts alike — on a test stream these are
+            the ONLY way to see the result, since YouTube is private and Facebook is unpublished. */}
+        {isLive && stream.platforms.some((ps) => getWatchUrls(ps).watch) && (
+          <>
+            <Text fw={500} mt="sm">
+              Watch it live{stream.is_test === 1 ? ' (visible only to you)' : ''}
+            </Text>
+            <Group>
+              {stream.platforms.map((ps) => {
+                const { watch, control } = getWatchUrls(ps);
+                if (!watch) return null;
+                return (
+                  <Group key={ps.id} gap={4}>
+                    <Anchor href={watch} target="_blank" rel="noopener">
+                      <Badge size="lg" color={platformColor(ps.platform)} style={{ cursor: 'pointer' }}>
+                        Open {ps.platform}
+                      </Badge>
+                    </Anchor>
+                    {control && (
+                      <Tooltip label="YouTube Live Control Room — shows YouTube's own bitrate and stream-health verdict">
+                        <Anchor href={control} target="_blank" rel="noopener">
+                          <Badge size="lg" variant="outline" color="red" style={{ cursor: 'pointer' }}>
+                            health
+                          </Badge>
+                        </Anchor>
+                      </Tooltip>
+                    )}
+                  </Group>
+                );
+              })}
+            </Group>
+            {stream.is_test === 1 && (
+              <Text size="xs" c="dimmed">
+                This is a test stream: the YouTube broadcast is private and the Facebook video is never
+                published, so neither appears on your channel or Page. These links are the only way in.
+              </Text>
+            )}
+          </>
+        )}
+
         {stream.platforms.some((ps) => getVodUrl(ps)) && (
           <>
             <Text fw={500} mt="sm">Recordings</Text>
@@ -449,7 +509,7 @@ export function StreamPage() {
                     <Badge
                       size="lg"
                       variant="light"
-                      color={ps.platform === 'youtube' ? 'red' : ps.platform === 'facebook' ? 'blue' : 'violet'}
+                      color={platformColor(ps.platform)}
                       style={{ cursor: 'pointer' }}
                     >
                       {ps.platform} VOD

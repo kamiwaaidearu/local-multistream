@@ -7,6 +7,7 @@ import type { AuthProbe } from '../auth/authProbe.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
 import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, deleteFacebookLiveVideo, resolveFacebookVideoId } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
+import { getTwitchChannelInfo } from '../auth/twitch.js';
 import { getReminderSettings, computeReminderTime, renderReminder } from './reminders.js';
 import { startHealthMonitor, stopHealthMonitor, waitForPlatformReceiving } from './healthMonitor.js';
 import { decidePreflight } from './authPreflight.js';
@@ -550,8 +551,64 @@ export async function goLive(streamId: string, opts: { force?: boolean } = {}): 
     // Watch every platform's OWN view of the ingest for the rest of the broadcast. Our FFmpeg
     // staying alive is not evidence the platform is receiving anything — see healthMonitor.
     startHealthMonitor(streamId);
+
+    // Resolve the per-platform "watch it now" links in the background — never block go-live on them.
+    void storeWatchUrls(streamId, platformStreams).catch(() => { /* best-effort */ });
   } finally {
     goLiveInFlight = false;
+  }
+}
+
+/**
+ * Resolve and store a direct "watch it now" link for each platform at go-live.
+ *
+ * This matters most for a TEST stream, where YouTube is private and Facebook is unpublished: neither
+ * appears anywhere browsable, so the direct permalink is the only way to look at them. Hunting for it by
+ * hand mid-rehearsal is exactly the friction a dry run shouldn't have. It's useful for real broadcasts
+ * too — one click to see what each destination is actually showing.
+ *
+ * Best-effort throughout: a link is a convenience and must never affect the broadcast.
+ */
+async function storeWatchUrls(streamId: string, platformStreams: PlatformStream[]): Promise<void> {
+  const db = getDb();
+
+  const patchExtra = (ps: PlatformStream, patch: Record<string, string>) => {
+    try {
+      const row = db.prepare('SELECT extra_json FROM platform_streams WHERE id = ?').get(ps.id) as
+        { extra_json: string | null } | undefined;
+      const extra = row?.extra_json ? JSON.parse(row.extra_json) : {};
+      db.prepare('UPDATE platform_streams SET extra_json = ? WHERE id = ?')
+        .run(JSON.stringify({ ...extra, ...patch }), ps.id);
+    } catch (err) {
+      console.warn('[manager] Could not store watch URL:', err instanceof Error ? err.message : err);
+    }
+  };
+
+  // YouTube: derivable straight from the broadcast id, private or not. Also link the Live Control Room,
+  // which shows YouTube's OWN bitrate and health reading — the number whose absence started all this.
+  const yt = platformStreams.find((p) => p.platform === 'youtube');
+  if (yt?.broadcast_id) {
+    patchExtra(yt, {
+      watch_url: `https://www.youtube.com/watch?v=${yt.broadcast_id}`,
+      control_url: `https://studio.youtube.com/video/${yt.broadcast_id}/livestreaming`,
+    });
+  }
+
+  // Twitch: just the channel page — there's no per-broadcast URL while live.
+  const tw = platformStreams.find((p) => p.platform === 'twitch');
+  if (tw) {
+    const channel = getTwitchChannelInfo();
+    if (channel?.login) patchExtra(tw, { watch_url: `https://www.twitch.tv/${channel.login}` });
+  }
+
+  // Facebook needs a Graph call: the live-video id is NOT the id in the /videos/{id} permalink (see
+  // resolveFacebookVideoId). Confirmed to resolve even while the video is still UNPUBLISHED.
+  const fb = platformStreams.find((p) => p.platform === 'facebook');
+  if (fb?.broadcast_id) {
+    try {
+      const videoId = await resolveFacebookVideoId(fb.broadcast_id);
+      if (videoId) patchExtra(fb, { watch_url: facebookVideoUrl(await getFacebookPageUrl(), videoId) });
+    } catch { /* best-effort — the link is a convenience */ }
   }
 }
 
