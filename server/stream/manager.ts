@@ -5,11 +5,12 @@ import { getFacebookPageToken, getFacebookPageUrl, probeFacebookAuth } from '../
 import { getTwitchCredentials, probeTwitchAuth } from '../auth/twitch.js';
 import type { AuthProbe } from '../auth/authProbe.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
-import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, resolveFacebookVideoId } from '../platforms/facebook.js';
+import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, deleteFacebookLiveVideo, resolveFacebookVideoId } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
 import { getReminderSettings, computeReminderTime, renderReminder } from './reminders.js';
 import { startHealthMonitor, stopHealthMonitor, waitForPlatformReceiving } from './healthMonitor.js';
 import { decidePreflight } from './authPreflight.js';
+import { mayPublishToFacebook, shouldDeleteFacebookVideoOnEnd } from './testStreamPolicy.js';
 import type { Stream, PlatformStream, Platform } from '../types.js';
 
 function logEvent(streamId: string | null, platform: string | null, event: string, detail?: string) {
@@ -50,7 +51,7 @@ function facebookAnnouncementPosts(extraJson: string | null | undefined): Schedu
  */
 async function scheduleFacebookReminders(stream: Stream): Promise<ScheduledPost[]> {
   // A test stream must never post anything to the Page — that's the entire point of it being private.
-  if (stream.is_test === 1) return [];
+  if (!mayPublishToFacebook(stream.is_test, 'schedule_announcements')) return [];
   if (!stream.scheduled_start || !stream.fb_reminders_enabled) return [];
 
   const settings = getReminderSettings();
@@ -120,7 +121,7 @@ export async function resyncFacebookReminders(streamId: string): Promise<void> {
 async function postGoLiveAnnouncement(stream: Stream, broadcastId: string): Promise<void> {
   // Belt-and-braces: the test path returns before reaching here, but a public post is irreversible so
   // it's worth refusing in two places rather than relying on one caller.
-  if (stream.is_test === 1) return;
+  if (!mayPublishToFacebook(stream.is_test, 'golive_post')) return;
   if (!stream.fb_reminders_enabled) return;
   const settings = getReminderSettings();
   if (!settings.enabled || !settings.goLivePost?.enabled) return;
@@ -255,6 +256,17 @@ export async function retryPlatformLive(streamId: string, platform: Platform): P
       logEvent(streamId, 'facebook', 'setup_success', `Live video ${fb.liveVideoId} created on retry`);
     }
     ensurePlatformLeg(streamId, ps);
+
+    // On a test stream, restarting the leg is the whole of the retry: publishing would make the video
+    // visible on the Page, which is exactly what a private dry run must never do. This path is why the
+    // publicity check lives in testStreamPolicy rather than being repeated inline — it was missed here
+    // when the test-stream flag was first added.
+    if (!mayPublishToFacebook(stream.is_test, 'publish_live_now')) {
+      db.prepare("UPDATE platform_streams SET status = 'live', error_message = NULL WHERE id = ?").run(ps.id);
+      logEvent(streamId, 'facebook', 'retried_live', 'TEST stream — leg restarted, left unpublished');
+      return;
+    }
+
     // Facebook only accepts LIVE_NOW once it's receiving the encoder's data — give a freshly
     // (re)started leg a moment to connect before publishing.
     await new Promise((r) => setTimeout(r, 3000));
@@ -594,7 +606,7 @@ async function publishFacebookOnceReceiving(streamId: string, stream: Stream, fb
   // A test stream deliberately stops here. An UNPUBLISHED live video is, per the Live Video API, "not
   // visible to other users" — so leaving it unpublished gives a complete rehearsal of the encode,
   // fan-out and stream_health path with nothing whatsoever appearing on the Page.
-  if (stream.is_test === 1) {
+  if (!mayPublishToFacebook(stream.is_test, 'publish_live_now')) {
     logEvent(streamId, 'facebook', receiving ? 'test_ingest_confirmed' : 'test_ingest_unconfirmed',
       `TEST stream — leaving the live video unpublished (${receiving ? `receiving, ${bitrate}` : 'no ingest reported'})`);
     console.log(`[manager] TEST stream — Facebook left unpublished. Ingest ${receiving ? `confirmed (${bitrate})` : 'NOT confirmed'}`);
@@ -668,7 +680,24 @@ export async function endStream(streamId: string): Promise<void> {
 
   // End Facebook live video
   const fbPs = platformStreams.find((ps) => ps.platform === 'facebook');
-  if (fbPs?.broadcast_id) {
+  if (fbPs?.broadcast_id && shouldDeleteFacebookVideoOnEnd(stream.is_test)) {
+    // A test stream leaves nothing behind. Ending an unpublished broadcast reportedly keeps it
+    // unpublished (owner-only), but "invisible" and "gone" are different promises and only one of them
+    // can be confirmed by looking at the Page — so delete it outright. No VOD link is recorded, since
+    // there is deliberately no video to link to.
+    try {
+      await deleteFacebookLiveVideo(fbPs.broadcast_id);
+      db.prepare("UPDATE platform_streams SET status = 'ended' WHERE id = ?").run(fbPs.id);
+      logEvent(streamId, 'facebook', 'test_video_deleted', `Deleted test live video ${fbPs.broadcast_id}`);
+    } catch (err) {
+      // deleteFacebookLiveVideo already logs; make sure the row still ends and the operator is told,
+      // because a leftover test video is something they may want to remove by hand.
+      console.error('[manager] Could not delete the test Facebook video:', err);
+      db.prepare("UPDATE platform_streams SET status = 'ended', error_message = ? WHERE id = ?")
+        .run(`Test video ${fbPs.broadcast_id} could not be deleted — check the Page and remove it manually`, fbPs.id);
+      logEvent(streamId, 'facebook', 'test_video_delete_failed', String(err));
+    }
+  } else if (fbPs?.broadcast_id) {
     try {
       await endFacebookLiveVideo(fbPs.broadcast_id);
       const extra = fbPs.extra_json ? JSON.parse(fbPs.extra_json) : {};
