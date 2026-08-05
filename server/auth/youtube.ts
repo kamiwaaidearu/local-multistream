@@ -1,6 +1,7 @@
 import { google } from 'googleapis';
 import { config } from '../config.js';
 import { getDb } from '../db/index.js';
+import { type AuthProbe, indeterminate, rejected, statusIsAuthoritative, VALID } from './authProbe.js';
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube',
@@ -100,12 +101,13 @@ export function getYouTubeAuth(): ReturnType<typeof createOAuth2Client> | null {
  * result means routine checks also keep the access token warm — so go-live isn't the first thing in
  * hours to depend on the grant still being valid.
  */
-export async function refreshYouTubeAccessToken(): Promise<{ ok: boolean; error?: string }> {
+export async function refreshYouTubeAccessToken(): Promise<AuthProbe> {
   const db = getDb();
   const cred = db.prepare('SELECT refresh_token FROM credentials WHERE platform = ?').get('youtube') as
     { refresh_token: string | null } | undefined;
 
-  if (!cred?.refresh_token) return { ok: false, error: 'No YouTube account is connected' };
+  // No stored grant at all is an authoritative "unusable" — nothing to reach out and check.
+  if (!cred?.refresh_token) return rejected('No YouTube account is connected');
 
   try {
     const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -126,8 +128,12 @@ export async function refreshYouTubeAccessToken(): Promise<{ ok: boolean; error?
     if (!res.ok || !data.access_token) {
       // invalid_grant here means the grant is dead and NO amount of retrying will fix it — the
       // operator must reconnect YouTube. Surface Google's own wording; it distinguishes "expired or
-      // revoked" from other failures.
-      return { ok: false, error: data.error_description ?? data.error ?? res.statusText };
+      // revoked" from other failures. A 5xx from Google, by contrast, tells us nothing about our
+      // grant, so it must not be allowed to block a broadcast.
+      const message = data.error_description ?? data.error ?? res.statusText;
+      return statusIsAuthoritative(res.status)
+        ? rejected(message)
+        : indeterminate(`Google could not answer right now (${res.status}): ${message}`);
     }
 
     db.prepare('UPDATE credentials SET access_token = ?, token_expiry = ? WHERE platform = ?').run(
@@ -135,37 +141,43 @@ export async function refreshYouTubeAccessToken(): Promise<{ ok: boolean; error?
       Date.now() + (data.expires_in ?? 3600) * 1000,
       'youtube',
     );
-    return { ok: true };
+    return VALID;
   } catch (err) {
-    // A network blip is NOT a dead grant — say so, so callers don't tell the operator to reconnect.
-    return { ok: false, error: `Could not reach Google: ${err instanceof Error ? err.message : String(err)}` };
+    // A network blip is NOT a dead grant — say so, so callers don't tell the operator to reconnect
+    // and, more importantly, so this can never hard-block a go-live.
+    return indeterminate(`Could not reach Google: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
 // Cache the last real probe briefly. getPlatformAuthHealth backs both the UI's pre-go-live check and
 // the watchdog; without this, a future caller adding a poll would hammer Google's token endpoint.
-let lastProbe: { at: number; ok: boolean; error?: string } | null = null;
+let lastProbe: { at: number; probe: AuthProbe } | null = null;
 const PROBE_CACHE_MS = 60_000;
 
 /** The most recent probe result, for surfacing WHY auth is broken without re-probing. */
 export function lastYouTubeAuthError(): string | null {
-  return lastProbe && !lastProbe.ok ? lastProbe.error ?? 'Unknown error' : null;
+  return lastProbe && !lastProbe.probe.ok ? lastProbe.probe.error ?? 'Unknown error' : null;
 }
 
 /**
  * Verify YouTube auth is genuinely usable, by exercising the refresh token rather than trusting a
- * cached access token. Returns false when no account is connected or the grant is dead.
+ * cached access token. See AuthProbe for why the result distinguishes "revoked" from "unreachable".
  */
-export async function validateYouTubeAuth(opts: { force?: boolean } = {}): Promise<boolean> {
-  if (!getYouTubeAuth()) return false;
+export async function probeYouTubeAuth(opts: { force?: boolean } = {}): Promise<AuthProbe> {
+  if (!getYouTubeAuth()) return rejected('No YouTube account is connected');
 
   if (!opts.force && lastProbe && Date.now() - lastProbe.at < PROBE_CACHE_MS) {
-    return lastProbe.ok;
+    return lastProbe.probe;
   }
 
-  const { ok, error } = await refreshYouTubeAccessToken();
-  lastProbe = { at: Date.now(), ok, error };
-  return ok;
+  const probe = await refreshYouTubeAccessToken();
+  lastProbe = { at: Date.now(), probe };
+  return probe;
+}
+
+/** Boolean convenience wrapper, for callers that only care whether it works. */
+export async function validateYouTubeAuth(opts: { force?: boolean } = {}): Promise<boolean> {
+  return (await probeYouTubeAuth(opts)).ok;
 }
 
 export function disconnectYouTube(): void {

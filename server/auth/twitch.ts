@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { getDb } from '../db/index.js';
+import { type AuthProbe, indeterminate, rejected, VALID } from './authProbe.js';
 
 const SCOPES = ['channel:manage:broadcast', 'channel:read:stream_key'];
 
@@ -199,8 +200,23 @@ export function getTwitchChannelInfo(): { id: string; login: string; displayName
  * Verify Twitch auth is usable. refreshTwitchToken() renews when near expiry and returns null when
  * there's no usable refresh token, so a null result means the connection needs re-authing.
  */
+export async function probeTwitchAuth(): Promise<AuthProbe> {
+  try {
+    // NOTE: refreshTwitchToken deliberately does not catch fetch failures, so this try/catch is
+    // load-bearing twice over. It turns a network error into an indeterminate probe (which can never
+    // block a go-live), and it stops that error rejecting getPlatformAuthHealth's Promise.all — which
+    // previously took the whole auth-health response down with it.
+    return (await refreshTwitchToken()) !== null
+      ? VALID
+      : rejected('Twitch rejected the stored refresh token');
+  } catch (err) {
+    return indeterminate(`Could not reach Twitch: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Boolean convenience wrapper. */
 export async function validateTwitchAuth(): Promise<boolean> {
-  return (await refreshTwitchToken()) !== null;
+  return (await probeTwitchAuth()).ok;
 }
 
 export function disconnectTwitch(): void {

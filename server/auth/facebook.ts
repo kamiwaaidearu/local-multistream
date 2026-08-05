@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { getDb } from '../db/index.js';
+import { type AuthProbe, indeterminate, rejected, statusIsAuthoritative, VALID } from './authProbe.js';
 
 // publish_video: create/manage (incl. live) videos on the Page
 // pages_show_list: enumerate the user's Pages (needed to populate the Page picker)
@@ -178,20 +179,32 @@ export function getSelectedFacebookPage(): { id: string; name: string } | null {
  * Verify the stored Facebook Page token is still valid via debug_token. Returns false if no Page
  * is connected or Facebook reports the token invalid (revoked, expired, password change, etc.).
  */
-export async function validateFacebookAuth(): Promise<boolean> {
+export async function probeFacebookAuth(): Promise<AuthProbe> {
   const tok = getFacebookPageToken();
-  if (!tok) return false;
+  if (!tok) return rejected('No Facebook page is connected');
   try {
     const appToken = `${config.facebook.appId}|${config.facebook.appSecret}`;
     const res = await fetch(
       `https://graph.facebook.com/${config.fbApiVersion}/debug_token?input_token=${encodeURIComponent(tok.accessToken)}&access_token=${encodeURIComponent(appToken)}`,
     );
-    if (!res.ok) return false;
+    if (!res.ok) {
+      // A 4xx is Facebook rejecting the token; a 5xx is Facebook being unwell and says nothing about
+      // our token, so it must not be able to block a broadcast. See AuthProbe.
+      const message = `debug_token returned ${res.status}`;
+      return statusIsAuthoritative(res.status) ? rejected(message) : indeterminate(message);
+    }
     const body = await res.json() as { data?: { is_valid?: boolean } };
-    return body.data?.is_valid === true;
-  } catch {
-    return false;
+    return body.data?.is_valid === true
+      ? VALID
+      : rejected('Facebook reports the page token is no longer valid');
+  } catch (err) {
+    return indeterminate(`Could not reach Facebook: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** Boolean convenience wrapper. */
+export async function validateFacebookAuth(): Promise<boolean> {
+  return (await probeFacebookAuth()).ok;
 }
 
 export function disconnectFacebook(): void {

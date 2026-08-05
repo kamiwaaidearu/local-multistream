@@ -109,6 +109,13 @@ export function getDb(): DatabaseSync {
       console.log('[db] Added streams.fb_reminders_enabled column');
     }
 
+    // Test streams: a full dry run of the whole pipeline with nothing visible to the public.
+    // Defaults to 0 so every existing stream stays a real broadcast.
+    if (!streamCols.some((c) => c.name === 'is_test')) {
+      db.exec('ALTER TABLE streams ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0');
+      console.log('[db] Added streams.is_test column');
+    }
+
     console.log(`[db] SQLite database opened at ${DB_PATH}`);
   }
   return db;

@@ -81,6 +81,8 @@ export async function createYouTubeBroadcast(
   description: string | null,
   scheduledStart: number | null,
   thumbnailPath: string | null,
+  /** Create the broadcast as private (a dry run) instead of public. */
+  isTest = false,
 ): Promise<{ broadcastId: string; streamId: string; rtmpUrl: string; streamKey: string }> {
   const yt = getYouTube();
 
@@ -113,7 +115,9 @@ export async function createYouTubeBroadcast(
         latencyPreference: 'normal',
         monitorStream: { enableMonitorStream: false },
       },
-      status: { privacyStatus: 'public' },
+      // 'private' (not 'unlisted') for a test: unlisted is viewable by anyone holding the link, which
+      // is not a guarantee worth relying on for a rehearsal. Private is visible only to the account.
+      status: { privacyStatus: isTest ? 'private' : 'public' },
     },
   });
 

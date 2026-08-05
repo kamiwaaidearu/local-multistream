@@ -1,13 +1,15 @@
 import { nanoid } from 'nanoid';
 import { getDb } from '../db/index.js';
-import { getYouTubeAuth, validateYouTubeAuth, lastYouTubeAuthError } from '../auth/youtube.js';
-import { getFacebookPageToken, getFacebookPageUrl, validateFacebookAuth } from '../auth/facebook.js';
-import { getTwitchCredentials, validateTwitchAuth } from '../auth/twitch.js';
+import { getYouTubeAuth, probeYouTubeAuth } from '../auth/youtube.js';
+import { getFacebookPageToken, getFacebookPageUrl, probeFacebookAuth } from '../auth/facebook.js';
+import { getTwitchCredentials, probeTwitchAuth } from '../auth/twitch.js';
+import type { AuthProbe } from '../auth/authProbe.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
 import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, resolveFacebookVideoId } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
 import { getReminderSettings, computeReminderTime, renderReminder } from './reminders.js';
 import { startHealthMonitor, stopHealthMonitor, waitForPlatformReceiving } from './healthMonitor.js';
+import { decidePreflight } from './authPreflight.js';
 import type { Stream, PlatformStream, Platform } from '../types.js';
 
 function logEvent(streamId: string | null, platform: string | null, event: string, detail?: string) {
@@ -47,6 +49,8 @@ function facebookAnnouncementPosts(extraJson: string | null | undefined): Schedu
  * individual failures are logged but never block setup. Returns the created posts (id + time).
  */
 async function scheduleFacebookReminders(stream: Stream): Promise<ScheduledPost[]> {
+  // A test stream must never post anything to the Page — that's the entire point of it being private.
+  if (stream.is_test === 1) return [];
   if (!stream.scheduled_start || !stream.fb_reminders_enabled) return [];
 
   const settings = getReminderSettings();
@@ -114,6 +118,9 @@ export async function resyncFacebookReminders(streamId: string): Promise<void> {
  * global enable, the go-live sub-toggle, and the per-stream toggle. Best-effort.
  */
 async function postGoLiveAnnouncement(stream: Stream, broadcastId: string): Promise<void> {
+  // Belt-and-braces: the test path returns before reaching here, but a public post is irreversible so
+  // it's worth refusing in two places rather than relying on one caller.
+  if (stream.is_test === 1) return;
   if (!stream.fb_reminders_enabled) return;
   const settings = getReminderSettings();
   if (!settings.enabled || !settings.goLivePost?.enabled) return;
@@ -147,18 +154,35 @@ export interface PlatformAuthHealth {
   ok: boolean;
   /** Why it's broken, when the platform told us (e.g. "Token has been expired or revoked."). */
   error?: string | null;
+  /** True when the platform gave an authoritative answer. A false `ok` with `determinate: false`
+   *  means we couldn't reach the platform, NOT that the login is dead — see AuthProbe. */
+  determinate?: boolean;
 }
 
 /**
- * Thrown by goLive when a connected platform's login is dead. Carries the platform list so the API
- * can return a 409 the UI turns into a confirm-and-override prompt, rather than a dead end: the
- * operator must ALWAYS be able to get on air without the broken platform.
+ * Thrown by goLive when a connected platform's login can't be confirmed working.
+ *
+ * `overridable` is the difference between the two cases, and it decides whether the operator gets a
+ * way through:
+ *
+ * - NOT overridable — the platform authoritatively says the grant is dead. Go-live is prevented
+ *   outright and `force` will not bypass it. Reconnecting is the only way forward. This is the
+ *   2026-08-05 case: a broken YouTube login that previously produced only an ignorable banner.
+ * - overridable — we couldn't reach the platform to ask. Blocking on ignorance could keep a healthy
+ *   broadcast off the air over a DNS blip, so the operator can acknowledge and proceed.
  */
 export class AuthPreflightError extends Error {
-  constructor(public readonly platforms: string[]) {
+  constructor(
+    public readonly platforms: string[],
+    public readonly overridable: boolean,
+    detail?: string,
+  ) {
     super(
-      `These platforms have a broken login and cannot go live: ${platforms.join(', ')}. ` +
-      'Reconnect them in Settings, or go live without them.',
+      overridable
+        ? `Couldn't verify the login for: ${platforms.join(', ')}${detail ? ` (${detail})` : ''}. ` +
+          'You can go live anyway, or retry once the connection settles.'
+        : `${platforms.join(', ')} ${platforms.length === 1 ? 'has' : 'have'} an expired or revoked ` +
+          `login and cannot go live${detail ? ` (${detail})` : ''}. Reconnect in Settings first.`,
     );
     this.name = 'AuthPreflightError';
   }
@@ -174,15 +198,24 @@ export async function getPlatformAuthHealth(): Promise<Record<Platform, Platform
   const ytConnected = !!getYouTubeAuth();
   const fbConnected = !!getFacebookPageToken();
   const twConnected = !!getTwitchCredentials();
+  // Not-connected platforms are reported as an authoritative "unusable" without a network call —
+  // they simply aren't part of any stream (see getEnabledPlatforms).
+  const absent: AuthProbe = { ok: false, determinate: true, error: 'Not connected' };
   const [yt, fb, tw] = await Promise.all([
-    ytConnected ? validateYouTubeAuth() : Promise.resolve(false),
-    fbConnected ? validateFacebookAuth() : Promise.resolve(false),
-    twConnected ? validateTwitchAuth() : Promise.resolve(false),
+    ytConnected ? probeYouTubeAuth() : Promise.resolve(absent),
+    fbConnected ? probeFacebookAuth() : Promise.resolve(absent),
+    twConnected ? probeTwitchAuth() : Promise.resolve(absent),
   ]);
+  const toHealth = (connected: boolean, probe: AuthProbe): PlatformAuthHealth => ({
+    connected,
+    ok: probe.ok,
+    error: probe.ok ? null : probe.error ?? null,
+    determinate: probe.determinate,
+  });
   return {
-    youtube: { connected: ytConnected, ok: yt, error: yt ? null : lastYouTubeAuthError() },
-    facebook: { connected: fbConnected, ok: fb },
-    twitch: { connected: twConnected, ok: tw },
+    youtube: toHealth(ytConnected, yt),
+    facebook: toHealth(fbConnected, fb),
+    twitch: toHealth(twConnected, tw),
   };
 }
 
@@ -248,8 +281,20 @@ export async function setupStream(streamId: string): Promise<{ results: Record<s
     throw new Error('Can only setup draft or ready streams');
   }
 
-  const platforms = getEnabledPlatforms();
-  if (platforms.length === 0) throw new Error('No platforms connected. Go to Settings first.');
+  const isTest = stream.is_test === 1;
+
+  // Twitch has no private/unlisted live mode — anything streamed to a channel is public the moment it
+  // starts. So a test stream simply doesn't set Twitch up; there's no way to rehearse it privately.
+  const platforms = getEnabledPlatforms().filter((p) => !(isTest && p === 'twitch'));
+  if (platforms.length === 0) {
+    throw new Error(isTest
+      ? 'A test stream needs YouTube or Facebook connected (Twitch has no private mode, so it is skipped).'
+      : 'No platforms connected. Go to Settings first.');
+  }
+  if (isTest) {
+    console.log('[manager] TEST stream — YouTube private, Facebook stays unpublished, Twitch skipped, no posts');
+    logEvent(streamId, null, 'test_stream_setup', 'Private dry run: YouTube private, Facebook unpublished, Twitch skipped');
+  }
 
   const results: Record<string, { success: boolean; error?: string }> = {};
   let anySuccess = false;
@@ -270,6 +315,7 @@ export async function setupStream(streamId: string): Promise<{ results: Record<s
           stream.description,
           stream.scheduled_start,
           stream.thumbnail_path,
+          isTest,
         );
 
         const psId = existing?.id ?? nanoid();
@@ -384,15 +430,17 @@ export async function goLive(streamId: string, opts: { force?: boolean } = {}): 
     if (platformStreams.length === 0) throw new Error('No platforms are set up');
 
     // Auth pre-flight. A connected platform with a dead grant does not fail loudly — it goes live on
-    // paper and silently does nothing, which is how the 2026-08-05 YouTube leg was lost. Stopping here
-    // gives the operator the chance to reconnect BEFORE the broadcast starts.
+    // paper and silently does nothing, which is how the 2026-08-05 YouTube leg was lost while the UI
+    // showed everything green.
     //
-    // This is a speed bump, never a wall: `force` always gets through, so a broken platform (or a
-    // broken health probe) can never prevent going live on the platforms that do work.
-    if (!opts.force) {
-      const health = await getPlatformAuthHealth();
-      const broken = Object.entries(health).filter(([, v]) => v.connected && !v.ok).map(([p]) => p);
-      if (broken.length > 0) throw new AuthPreflightError(broken);
+    // Two tiers — see decidePreflight. A revoked login blocks and `force` cannot bypass it; a platform
+    // we merely couldn't reach only needs acknowledgement, because refusing to broadcast over a DNS
+    // blip would be a self-inflicted outage.
+    const preflight = decidePreflight(await getPlatformAuthHealth(), opts.force === true);
+    if (preflight.action !== 'proceed') {
+      logEvent(streamId, null, 'golive_blocked',
+        `${preflight.action}: ${preflight.platforms.join(', ')} — ${preflight.detail ?? 'login not usable'}`);
+      throw new AuthPreflightError(preflight.platforms, preflight.action === 'confirm', preflight.detail);
     }
 
     // Verify an ingest source is present. Without this we'd mark the stream "live" while nothing
@@ -542,6 +590,16 @@ async function publishFacebookOnceReceiving(streamId: string, stream: Stream, fb
   // (confirm ingest → publish → announce) possible.
   const { receiving, detail } = await waitForPlatformReceiving(fbPs, { timeoutMs: 45_000 });
   const bitrate = detail.videoKbps != null ? `${detail.videoKbps} kbps` : 'bitrate unknown';
+
+  // A test stream deliberately stops here. An UNPUBLISHED live video is, per the Live Video API, "not
+  // visible to other users" — so leaving it unpublished gives a complete rehearsal of the encode,
+  // fan-out and stream_health path with nothing whatsoever appearing on the Page.
+  if (stream.is_test === 1) {
+    logEvent(streamId, 'facebook', receiving ? 'test_ingest_confirmed' : 'test_ingest_unconfirmed',
+      `TEST stream — leaving the live video unpublished (${receiving ? `receiving, ${bitrate}` : 'no ingest reported'})`);
+    console.log(`[manager] TEST stream — Facebook left unpublished. Ingest ${receiving ? `confirmed (${bitrate})` : 'NOT confirmed'}`);
+    return;
+  }
 
   if (receiving) {
     logEvent(streamId, 'facebook', 'ingest_confirmed', `Facebook is receiving video (${bitrate})`);

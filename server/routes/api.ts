@@ -44,11 +44,14 @@ apiRouter.post('/streams', upload.single('thumbnail'), (req: Request, res: Respo
   const thumbnail_path = req.file ? `/uploads/${req.file.filename}` : null;
   // Default Facebook reminders ON; only an explicit 'false'/'0' opts out.
   const fbReminders = req.body.fb_reminders_enabled === 'false' || req.body.fb_reminders_enabled === '0' ? 0 : 1;
+  // Test streams are strictly opt-IN — the default must always be a real broadcast, so only an
+  // explicit 'true'/'1' makes one private.
+  const isTest = req.body.is_test === 'true' || req.body.is_test === '1' ? 1 : 0;
 
   db.prepare(`
-    INSERT INTO streams (id, series_id, name, description, thumbnail_path, scheduled_start, fb_reminders_enabled, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)
-  `).run(id, series_id ?? null, name, description ?? null, thumbnail_path, scheduled_start ? parseInt(scheduled_start) : null, fbReminders, Date.now());
+    INSERT INTO streams (id, series_id, name, description, thumbnail_path, scheduled_start, fb_reminders_enabled, is_test, status, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)
+  `).run(id, series_id ?? null, name, description ?? null, thumbnail_path, scheduled_start ? parseInt(scheduled_start) : null, fbReminders, isTest, Date.now());
 
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream;
   res.status(201).json(stream);
@@ -357,9 +360,15 @@ apiRouter.post('/streams/:id/go-live', async (req: Request, res: Response) => {
   } catch (err) {
     const { AuthPreflightError } = await import('../stream/manager.js');
     if (err instanceof AuthPreflightError) {
-      // 409, not 400: the request was valid and is retryable as-is with force — the UI turns this
-      // into a confirm prompt rather than a plain failure.
-      res.status(409).json({ error: err.message, code: 'auth_preflight', platforms: err.platforms });
+      // 409: the request was well-formed but the platform state blocks it. `overridable` tells the UI
+      // whether to offer "Go Live Anyway" at all — for a definitively dead login it must not, since
+      // force won't bypass it server-side either.
+      res.status(409).json({
+        error: err.message,
+        code: 'auth_preflight',
+        platforms: err.platforms,
+        overridable: err.overridable,
+      });
       return;
     }
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });

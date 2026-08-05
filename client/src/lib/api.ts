@@ -35,6 +35,9 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly code?: string,
     public readonly platforms?: string[],
+    /** For 'auth_preflight': false when the block cannot be overridden (a definitively dead login),
+     *  true when it's only "we couldn't reach the platform to check". */
+    public readonly overridable?: boolean,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -80,7 +83,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new ApiError(body.error ?? `Request failed: ${res.status}`, res.status, body.code, body.platforms);
+    throw new ApiError(
+      body.error ?? `Request failed: ${res.status}`,
+      res.status,
+      body.code,
+      body.platforms,
+      body.overridable,
+    );
   }
   if (res.status === 204) return undefined as T;
   return res.json();

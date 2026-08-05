@@ -15,6 +15,13 @@ export interface Stream {
   scheduled_start: number | null;
   status: 'draft' | 'ready' | 'live' | 'ended' | 'error';
   fb_reminders_enabled: number; // 0/1 — schedule Facebook announcement posts for this stream
+  /**
+   * 0/1 — a private dry run. Exercises the entire pipeline (encode, fan-out, platform transitions,
+   * health monitoring) with nothing public: YouTube is created private, the Facebook live video is
+   * never published so it stays invisible, Twitch is skipped (it has no private mode), and no
+   * announcement posts are made. Use this to rehearse before a real broadcast.
+   */
+  is_test: number;
   started_at: number | null;
   ended_at: number | null;
   created_at: number;

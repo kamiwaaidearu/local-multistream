@@ -58,6 +58,8 @@ interface StreamData {
   thumbnail_path: string | null;
   scheduled_start: number | null;
   status: string;
+  /** 0/1 — a private dry run: YouTube private, Facebook never published, Twitch skipped, no posts. */
+  is_test?: number;
   started_at: number | null;
   ended_at: number | null;
   platforms: PlatformStream[];
@@ -112,8 +114,11 @@ export function StreamPage() {
   // Per-platform auth health (go-live pre-check + live reconnect) and reconnect-in-progress marker.
   const [authHealth, setAuthHealth] = useState<Record<string, { connected: boolean; ok: boolean; error?: string | null }> | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
-  // Platforms the server's go-live pre-flight rejected; non-null opens the confirm-and-override modal.
-  const [authPreflight, setAuthPreflight] = useState<string[] | null>(null);
+  // The server's go-live pre-flight rejection; non-null opens the modal. `overridable` false means a
+  // definitively dead login — the modal then offers only Reconnect, because force won't get through.
+  const [authPreflight, setAuthPreflight] = useState<
+    { platforms: string[]; overridable: boolean; message: string } | null
+  >(null);
 
   // Refs to call studio connect/disconnect from action button
   const studioConnectRef = useRef<(() => void) | null>(null);
@@ -273,7 +278,13 @@ export function StreamPage() {
       await refreshStream();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'auth_preflight') {
-        setAuthPreflight(err.platforms ?? []);
+        setAuthPreflight({
+          platforms: err.platforms ?? [],
+          // Default to NOT overridable: if the server didn't say, the safe reading is "don't offer a
+          // bypass we can't actually deliver" — force wouldn't get through server-side either.
+          overridable: err.overridable === true,
+          message: err.message,
+        });
         checkAuthHealth(); // refresh the banner so the reconnect buttons are accurate
       } else {
         notifications.show({ title: 'Error', message: String(err), color: 'red' });
@@ -343,6 +354,12 @@ export function StreamPage() {
       <Group>
         <Title order={2}>{stream.name}</Title>
         <Badge size="lg" color={statusColors[stream.status]}>{stream.status}</Badge>
+        {/* Unmissable: the difference between a rehearsal and a real broadcast to the congregation. */}
+        {stream.is_test === 1 && (
+          <Tooltip label="Private dry run — YouTube is private, Facebook stays unpublished, Twitch is skipped, and no posts are made.">
+            <Badge size="lg" color="grape" variant="filled">TEST</Badge>
+          </Tooltip>
+        )}
       </Group>
       {(canEdit || canDelete) && (
         <Menu shadow="md" width={160}>
@@ -454,13 +471,16 @@ export function StreamPage() {
     <Stack>
       {modeToggle}
 
-      {/* Pre-go-live auth warning: connected platforms whose login is broken will be skipped at
-          go-live until reconnected. Non-blocking — you can still go live on the healthy ones. */}
+      {/* Pre-go-live auth warning. This is now a BLOCKING condition, not an advisory one: go-live is
+          refused until these are reconnected. The old wording promised they'd merely be "skipped",
+          which both undersold the problem and described behaviour that no longer exists. */}
       {isReady && unhealthyPlatforms.length > 0 && (
-        <Alert color="orange" title="Some platforms need reconnecting">
+        <Alert color="red" title="Go live is blocked — reconnect these platforms">
           <Stack gap="xs">
             <Text size="sm">
-              These platforms have an expired login and will be skipped at go-live until reconnected:
+              These platforms have an expired or revoked login. Going live is prevented until they're
+              reconnected, because a platform with a dead login goes live in name only and silently
+              broadcasts nothing:
             </Text>
             <Group>
               {unhealthyPlatforms.map((p) => (
@@ -646,21 +666,21 @@ export function StreamPage() {
         />
       </Drawer>
 
-      {/* Auth pre-flight: a connected platform's login is dead, so it would go live in name only.
-          Offer reconnect, but never block — "Go Live Anyway" must always be available. */}
+      {/* Auth pre-flight. For a definitively dead login this is a WALL, not a warning: go-live is
+          prevented and the only way forward is reconnecting, because a platform that "goes live" with
+          a revoked token just silently does nothing. "Go Live Anyway" appears only when we merely
+          couldn't reach the platform to check — blocking on ignorance would be its own outage. */}
       <Modal
         opened={authPreflight !== null}
         onClose={() => setAuthPreflight(null)}
-        title="A platform login is broken"
+        title={authPreflight?.overridable ? "Couldn't verify a platform login" : 'Go live blocked — platform login expired'}
       >
         <Stack>
-          <Text>
-            {(authPreflight ?? []).join(', ')} {(authPreflight?.length ?? 0) === 1 ? 'has' : 'have'} an
-            expired or revoked login. Going live now would start the broadcast without{' '}
-            {(authPreflight?.length ?? 0) === 1 ? 'it' : 'them'}.
-          </Text>
-          {(authPreflight ?? []).map((platform) => (
-            <Group key={platform} justify="space-between">
+          <Alert color={authPreflight?.overridable ? 'yellow' : 'red'} variant="light">
+            {authPreflight?.message}
+          </Alert>
+          {(authPreflight?.platforms ?? []).map((platform) => (
+            <Group key={platform} justify="space-between" wrap="nowrap">
               <Text size="sm" c="dimmed">
                 {platform}: {authHealth?.[platform]?.error ?? 'login expired'}
               </Text>
@@ -675,20 +695,23 @@ export function StreamPage() {
             </Group>
           ))}
           <Text size="sm" c="dimmed">
-            Reconnecting opens a popup and won't disturb this tab or the Web Studio source.
+            Reconnecting opens a popup and won't disturb this tab or the Web Studio source. Once it
+            succeeds, press Go Live again.
           </Text>
           <Group justify="flex-end">
-            <Button variant="subtle" onClick={() => setAuthPreflight(null)}>Cancel</Button>
-            <Button
-              color="red"
-              loading={actionLoading === 'golive'}
-              onClick={() => {
-                setAuthPreflight(null);
-                void handleGoLive(true);
-              }}
-            >
-              Go Live Anyway
-            </Button>
+            <Button variant="subtle" onClick={() => setAuthPreflight(null)}>Close</Button>
+            {authPreflight?.overridable && (
+              <Button
+                color="red"
+                loading={actionLoading === 'golive'}
+                onClick={() => {
+                  setAuthPreflight(null);
+                  void handleGoLive(true);
+                }}
+              >
+                Go Live Anyway
+              </Button>
+            )}
           </Group>
         </Stack>
       </Modal>

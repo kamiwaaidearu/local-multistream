@@ -33,7 +33,11 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
   const [thumbnail, setThumbnail] = useState<File | null>(null);
   const [scheduledStart, setScheduledStart] = useState<Date | null>(null);
   const [fbReminders, setFbReminders] = useState(true);
+  // Opt-in only, and only settable at creation: turning an existing public broadcast into a "test"
+  // after its YouTube broadcast already exists would not retroactively make it private.
+  const [isTest, setIsTest] = useState(false);
   const [saving, setSaving] = useState(false);
+  const isNew = initialData === undefined;
 
   useEffect(() => {
     if (initialData) {
@@ -65,6 +69,7 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
       if (thumbnail) formData.append('thumbnail', thumbnail);
       if (scheduledStart) formData.append('scheduled_start', String(Math.floor(scheduledStart.getTime() / 1000)));
       formData.append('fb_reminders_enabled', fbReminders ? '1' : '0');
+      if (isNew && isTest) formData.append('is_test', '1');
       await onSave(formData);
     } catch (err) {
       notifications.show({ title: 'Error', message: String(err), color: 'red' });
@@ -115,9 +120,21 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
         <Switch
           label="Post to Facebook for this stream"
           description="Advance reminder posts (only when a start time is set above — they're timed off it, per the schedule in Settings), plus a “we're live now” post when you go live."
-          checked={fbReminders}
+          checked={fbReminders && !isTest}
+          disabled={isTest}
           onChange={(e) => setFbReminders(e.currentTarget.checked)}
         />
+
+        {/* Creation only: a stream whose YouTube broadcast already exists can't be made private
+            retroactively, so offering this on the edit form would be a lie. */}
+        {isNew && (
+          <Switch
+            label="Private test stream (dry run)"
+            description="Rehearse the whole pipeline with nothing public: YouTube is created private, the Facebook video is never published so it stays invisible, Twitch is skipped (it has no private mode), and no Facebook posts are made."
+            checked={isTest}
+            onChange={(e) => setIsTest(e.currentTarget.checked)}
+          />
+        )}
 
         <Group>
           <Button type="submit" loading={saving}>
