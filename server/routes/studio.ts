@@ -124,3 +124,45 @@ studioRouter.post('/quality', (req: Request, res: Response) => {
 
   res.json({ ok: true });
 });
+
+// --- Studio-side problem reports ---
+
+/**
+ * Report a problem the BROWSER can see but the server cannot: a congested uplink, or a camera/mic
+ * track that has ended or gone silent.
+ *
+ * These conditions were previously visible only as a banner in the operator's tab — and the operator is
+ * the person praying on camera, so nobody saw them. Routing them here puts them in the log and, via
+ * the alert webhook, in front of somebody who isn't presenting.
+ */
+const STUDIO_ALERT_KINDS = { uplink_congested: 'uplink_congested', track_ended: 'track_ended' } as const;
+
+studioRouter.post('/alert', async (req: Request, res: Response) => {
+  const { kind, subject, message, resolved } = (req.body ?? {}) as {
+    kind?: string; subject?: string; message?: string; resolved?: boolean;
+  };
+
+  // Allow-list the kinds: this endpoint is authenticated but it drives an outbound webhook, so it must
+  // not become a way to post arbitrary text wherever that webhook points.
+  if (!kind || !(kind in STUDIO_ALERT_KINDS)) {
+    res.status(400).json({ error: 'Unknown alert kind' });
+    return;
+  }
+  const label = String(subject ?? 'studio').slice(0, 60);
+  const detail = String(message ?? '').slice(0, 500);
+
+  getDb().prepare('INSERT INTO event_log (stream_id, platform, event, detail, ts) VALUES (?, ?, ?, ?, ?)')
+    .run(null, null, resolved ? `${kind}_resolved` : kind, detail || label, Date.now());
+
+  const { sendAlert, clearAlert } = await import('../alerts.js');
+  if (resolved) {
+    console.log(`[studio] ${kind} resolved: ${label}`);
+    // Recovered — let a later recurrence alert again rather than being suppressed.
+    clearAlert(kind as 'uplink_congested', label);
+  } else {
+    console.warn(`[studio] ${kind}: ${label} — ${detail}`);
+    sendAlert(kind as 'uplink_congested', label, detail || label);
+  }
+
+  res.json({ ok: true });
+});

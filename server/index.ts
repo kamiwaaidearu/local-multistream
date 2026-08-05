@@ -106,6 +106,12 @@ async function start(): Promise<void> {
   if (logFile) console.log(`[logging] Writing logs to ${logFile} (keeping ${config.logRetentionDays} days)`);
   else console.warn('[logging] File logging is disabled — logs exist only in this terminal');
 
+  // Alerting matters enough to state plainly at boot: without it, every warning this app produces
+  // lands only in the browser of whoever is on camera, who cannot be watching it.
+  const { alertsEnabled } = await import('./alerts.js');
+  if (alertsEnabled()) console.log('[alert] Urgent alerts will be POSTed to ALERT_WEBHOOK_URL');
+  else console.warn('[alert] ALERT_WEBHOOK_URL is not set — nobody will be notified of a problem mid-broadcast');
+
   validateConfig();
   getDb(); // Initialize database
 

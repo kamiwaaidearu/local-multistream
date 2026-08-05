@@ -1,6 +1,7 @@
 import { getDb } from '../db/index.js';
 import { getPlatformAuthHealth } from './manager.js';
 import { lastYouTubeAuthError } from '../auth/youtube.js';
+import { sendAlert, clearAlert } from '../alerts.js';
 import type { Platform } from '../types.js';
 
 // Proactive platform-auth watchdog.
@@ -45,6 +46,7 @@ async function check(): Promise<void> {
       if (previous === false) {
         console.log(`[authwatch] ${platform} login is working again`);
         logEvent(platform, 'auth_recovered', 'Credentials are valid again');
+        clearAlert('auth_broken', platform);
       }
       continue;
     }
@@ -56,6 +58,9 @@ async function check(): Promise<void> {
     // Loud on purpose. This is the warning that, had it existed, would have given hours of notice.
     console.error(`[authwatch] ${detail}`);
     logEvent(platform, 'auth_broken', detail);
+    // And loud somewhere the operator will actually see it before the next broadcast — go-live is now
+    // BLOCKED on this, so learning about it at 12:30 would still ruin the stream.
+    sendAlert('auth_broken', platform, `${detail}. Go-live will be blocked until it's reconnected.`);
   }
 }
 

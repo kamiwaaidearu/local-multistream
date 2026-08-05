@@ -62,6 +62,13 @@ export const config = Object.freeze({
   logDir: (process.env.LOG_DIR ?? '').trim(),
   // How many days of log files to keep. 0 or less disables pruning (keep everything).
   logRetentionDays: envInt('LOG_RETENTION_DAYS', 14),
+  // Webhook for urgent broadcast alerts (dead platform ingest, silent audio, broken login). Empty
+  // disables alerting. Every other warning this app produces appears only in the browser UI — which
+  // belongs to the person on camera — so without this, nobody learns about a problem until afterwards.
+  // Any URL accepting a JSON POST works: a Slack or Discord incoming webhook, ntfy, Zapier, etc.
+  alertWebhookUrl: (process.env.ALERT_WEBHOOK_URL ?? '').trim(),
+  // Prefix on every alert, so a shared channel makes it obvious which system is shouting.
+  alertPrefix: env('ALERT_PREFIX', '[RosaryMen stream]'),
   // Web Studio re-encode quality (kbps). This is the ingest encode, and the fan-out copies it
   // straight through to any platform whose ceiling allows it — so it's effectively the quality
   // YouTube and Twitch receive. Legs whose platform caps lower (Facebook) are transcoded down;

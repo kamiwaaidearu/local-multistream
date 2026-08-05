@@ -3,6 +3,7 @@ import { wsUrl } from '../lib/ws';
 import { QUALITY_PRESETS, DEFAULT_QUALITY } from '../lib/bandwidthProbe';
 import { nextReconnectStep, isFatalCloseCode } from '../lib/studioReconnect';
 import { getAuthToken } from '../lib/authToken';
+import { api } from '../lib/api';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -38,6 +39,8 @@ export function useStudioStream({
   const wsRef = useRef<WebSocket | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const backpressureIntervalRef = useRef<number>(0);
+  // Last congestion state reported to the server, so we only report transitions rather than every tick.
+  const backpressureReportedRef = useRef(false);
   const reconnectTimerRef = useRef<number>(0);
   const reconnectAttemptsRef = useRef<number>(0);
   const shouldReconnectRef = useRef<boolean>(false);
@@ -163,10 +166,26 @@ export function useStudioStream({
       setStatus('connected');
       setError(null);
 
-      // Monitor backpressure
+      // Monitor backpressure. A congested uplink means webm is queueing in the browser faster than it
+      // can be sent: latency grows, the server-side encoder starves, and every platform's quality
+      // suffers. This used to be a banner and nothing more — but the operator is on camera and cannot
+      // see it, so state CHANGES are also reported to the server, where they reach the log and the
+      // alert webhook. Reported on change only; a 2s poll would otherwise spam both.
       window.clearInterval(backpressureIntervalRef.current);
       backpressureIntervalRef.current = window.setInterval(() => {
-        setBackpressureWarning(ws.bufferedAmount > 5 * 1024 * 1024); // 5MB queued
+        const congested = ws.bufferedAmount > 5 * 1024 * 1024; // 5MB queued
+        setBackpressureWarning(congested);
+        if (congested === backpressureReportedRef.current) return;
+        backpressureReportedRef.current = congested;
+        void api.reportStudioAlert({
+          kind: 'uplink_congested',
+          subject: 'uplink',
+          message: congested
+            ? `Upload is falling behind — ${Math.round(ws.bufferedAmount / 1024 / 1024)} MB queued in the browser. ` +
+              'Video may stutter or lag on every platform.'
+            : 'Upload has caught up.',
+          resolved: !congested,
+        }).catch(() => { /* telemetry must never disturb a live stream */ });
       }, 2000);
     };
 

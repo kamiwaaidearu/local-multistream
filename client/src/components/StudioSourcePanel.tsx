@@ -18,6 +18,7 @@ import { notifications } from '@mantine/notifications';
 import { useCanvasCompositor, type GridTemplate } from '../hooks/useCanvasCompositor';
 import { useSegmentedStream } from '../hooks/useSegmentedStream';
 import { useAudioMixer, type AudioSourceKind } from '../hooks/useAudioMixer';
+import { useTrackWatch } from '../hooks/useTrackWatch';
 import { useStudioStream } from '../hooks/useStudioStream';
 import { measureUploadMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, recommendQuality, DEFAULT_QUALITY, type QualityKey } from '../lib/bandwidthProbe';
 import { FALLBACK_TEMPLATE } from '../lib/gridTemplate';
@@ -157,6 +158,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   // Track the slide-audio source so we can drop it from the mix when the screen share stops.
   const slideSourceIdRef = useRef<string | null>(null);
 
+
   // Start/stop camera (video only)
   const toggleWebcam = useCallback(async () => {
     if (webcamEnabled && webcamStream) {
@@ -294,6 +296,19 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     keepReconnecting,
   });
 
+  // Watch every capture track for death or silence. Gated on 'connected': before that the operator is
+  // legitimately toggling devices on and off, and doesn't need to be told about their own clicks.
+  // A track that ENDS is reported by the mixer as it auto-removes the source; this catches the other
+  // case — a track that stays attached but goes silent (device claimed by another app, hardware mute).
+  const deadTracks = useTrackWatch(
+    [
+      { label: 'Camera', stream: webcamStream },
+      { label: 'Slides (screen share)', stream: screenStream },
+      ...sources.map((s) => ({ label: s.label, stream: s.stream })),
+    ],
+    studioStatus === 'connected',
+  );
+
   // Lift status to parent
   useEffect(() => {
     onStatusChange(studioStatus);
@@ -427,6 +442,26 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
       {backpressureWarning && (
         <Alert color="yellow" title="Bandwidth Warning">
           Upload bandwidth may be insufficient. Stream quality may be affected.
+        </Alert>
+      )}
+
+      {/* A dead capture device is invisible to every downstream signal: the compositor keeps painting
+          its last frame and the platforms keep reporting a healthy 6000 kbps ingest. So say it here,
+          loudly — and it's also sent to the server so it reaches the alert webhook. */}
+      {deadTracks.length > 0 && (
+        <Alert color="red" title="A camera or microphone has stopped">
+          <Stack gap={4}>
+            {deadTracks.map((d) => (
+              <Text key={`${d.label}-${d.kind}-${d.problem}`} size="sm">
+                <Text span fw={600}>{d.label}</Text> — {d.kind === 'audio' ? 'audio' : 'video'}{' '}
+                {d.problem === 'ended' ? 'has stopped (device disconnected)' : 'is silent (muted or in use elsewhere)'}
+              </Text>
+            ))}
+            <Text size="xs" c="dimmed">
+              The broadcast is still running and will look healthy to the platforms — reconnect the
+              device, or re-add it below, to restore it.
+            </Text>
+          </Stack>
         </Alert>
       )}
 

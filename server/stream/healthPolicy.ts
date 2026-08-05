@@ -30,12 +30,21 @@ export interface HealthSample {
   probeFailed: boolean;
   /** Non-fatal quality complaints from the platform, e.g. ['videoBitrateLow']. */
   warnings: string[];
+  /**
+   * The platform reports video arriving but NO audio. null when it doesn't tell us either way.
+   *
+   * Tracked separately from `receiving` because for a prayer broadcast this is the worst failure there
+   * is — a perfect-looking picture with no prayer on it — and because it is invisible to every other
+   * signal we have: a muted microphone still produces a full-bitrate, full-framerate video stream.
+   */
+  audioMissing: boolean | null;
 }
 
 /** Per-platform counters the monitor carries between polls. */
 export interface HealthCounters {
   consecutiveBad: number;
   restarts: number;
+  consecutiveNoAudio: number;
 }
 
 export interface HealthDecision extends HealthCounters {
@@ -43,6 +52,14 @@ export interface HealthDecision extends HealthCounters {
   action: HealthAction;
   /** Operator-facing explanation, for the event log and the UI. */
   reason: string;
+  /**
+   * Audio has been absent long enough to be real rather than a slow first reading.
+   *
+   * Deliberately independent of `action`: restarting the fan-out leg cannot fix a muted mic or a dead
+   * audio device, so this must alarm WITHOUT consuming the restart budget or interfering with the
+   * video escalation ladder.
+   */
+  audioAlarm: boolean;
 }
 
 /** A freshly (re)started leg needs time to connect AND for the platform to measure it. Facebook's
@@ -53,6 +70,9 @@ export const DEFAULT_GRACE_MS = 25_000;
 export const DEFAULT_BAD_POLLS_BEFORE_RESTART = 2;
 /** How many automatic leg restarts to attempt before escalating to the operator. */
 export const DEFAULT_MAX_RESTARTS = 2;
+/** Consecutive polls with video-but-no-audio before alarming. Two (~40s) rules out a slow first
+ *  audio reading without letting a genuinely silent broadcast run on. */
+export const DEFAULT_NO_AUDIO_POLLS_BEFORE_ALARM = 2;
 
 export interface DecideInput {
   sample: HealthSample;
@@ -63,6 +83,7 @@ export interface DecideInput {
   graceMs?: number;
   badPollsBeforeRestart?: number;
   maxRestarts?: number;
+  noAudioPollsBeforeAlarm?: number;
 }
 
 /**
@@ -80,11 +101,22 @@ export function decideHealthAction(input: DecideInput): HealthDecision {
   const graceMs = input.graceMs ?? DEFAULT_GRACE_MS;
   const badPollsBeforeRestart = input.badPollsBeforeRestart ?? DEFAULT_BAD_POLLS_BEFORE_RESTART;
   const maxRestarts = input.maxRestarts ?? DEFAULT_MAX_RESTARTS;
+  const noAudioPolls = input.noAudioPollsBeforeAlarm ?? DEFAULT_NO_AUDIO_POLLS_BEFORE_ALARM;
   const { sample, counters } = input;
+
+  // Audio is folded in first and kept orthogonal to everything below: it only counts while video is
+  // actually arriving (no audio on a stream that isn't being received at all is not news), it never
+  // touches the restart counters, and it never suppresses a video decision.
+  const audioMissing = sample.receiving && !sample.probeFailed && sample.audioMissing === true;
+  const consecutiveNoAudio = audioMissing ? counters.consecutiveNoAudio + 1 : 0;
+  const audioAlarm = consecutiveNoAudio >= noAudioPolls;
+  const audioNote = audioAlarm ? ' — NO AUDIO' : '';
 
   if (sample.probeFailed) {
     return {
       ...counters,
+      consecutiveNoAudio,
+      audioAlarm,
       state: 'unknown',
       action: 'none',
       reason: 'Health probe failed — treating as unknown rather than acting on it',
@@ -92,12 +124,16 @@ export function decideHealthAction(input: DecideInput): HealthDecision {
   }
 
   if (sample.receiving) {
-    const degraded = sample.warnings.length > 0;
+    const degraded = sample.warnings.length > 0 || audioAlarm;
+    const notes = [...sample.warnings];
+    if (audioAlarm) notes.unshift('no audio');
     return {
       consecutiveBad: 0,
       restarts: 0,
+      consecutiveNoAudio,
+      audioAlarm,
       state: degraded ? 'degraded' : 'healthy',
-      reason: degraded ? `Receiving, with warnings: ${sample.warnings.join(', ')}` : 'Receiving',
+      reason: degraded ? `Receiving, with warnings: ${notes.join(', ')}` : 'Receiving',
       action: 'none',
     };
   }
@@ -106,6 +142,8 @@ export function decideHealthAction(input: DecideInput): HealthDecision {
   if (input.legAgeMs < graceMs) {
     return {
       ...counters,
+      consecutiveNoAudio,
+      audioAlarm,
       state: 'unknown',
       action: 'none',
       reason: 'Not receiving yet, still inside the leg warm-up window',
@@ -117,9 +155,11 @@ export function decideHealthAction(input: DecideInput): HealthDecision {
     return {
       consecutiveBad,
       restarts: counters.restarts,
+      consecutiveNoAudio,
+      audioAlarm,
       state: 'not_receiving',
       action: 'none',
-      reason: `Not receiving (${consecutiveBad}/${badPollsBeforeRestart} before restarting the leg)`,
+      reason: `Not receiving (${consecutiveBad}/${badPollsBeforeRestart} before restarting the leg)${audioNote}`,
     };
   }
 
@@ -127,17 +167,21 @@ export function decideHealthAction(input: DecideInput): HealthDecision {
     return {
       consecutiveBad: 0,
       restarts: counters.restarts + 1,
+      consecutiveNoAudio,
+      audioAlarm,
       state: 'not_receiving',
       action: 'restart_leg',
-      reason: `Not receiving — restarting the leg (attempt ${counters.restarts + 1}/${maxRestarts})`,
+      reason: `Not receiving — restarting the leg (attempt ${counters.restarts + 1}/${maxRestarts})${audioNote}`,
     };
   }
 
   return {
     consecutiveBad,
     restarts: counters.restarts,
+    consecutiveNoAudio,
+    audioAlarm,
     state: 'not_receiving',
     action: 'alarm',
-    reason: `Still not receiving after ${maxRestarts} leg restarts — operator action needed`,
+    reason: `Still not receiving after ${maxRestarts} leg restarts — operator action needed${audioNote}`,
   };
 }

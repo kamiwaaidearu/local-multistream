@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
+import { api } from '../lib/api';
 
 export type AudioSourceKind = 'microphone' | 'desktop' | 'slides';
 
@@ -10,6 +11,9 @@ export interface AudioSource {
   deviceId?: string;
   gain: number; // user-set level, 0..2
   muted: boolean;
+  /** The live capture stream, exposed so the UI can watch its tracks for silence (see useTrackWatch).
+   *  A track that ENDS is auto-removed below; a track that goes `muted` stays and needs watching. */
+  stream: MediaStream;
 }
 
 export interface AddAudioSourceInput {
@@ -152,13 +156,26 @@ export function useAudioMixer(): UseAudioMixerResult {
 
     // Auto-remove if the track ends on its own: a device unplugged, or the operator
     // clicking the browser's "Stop sharing" bar on a desktop/tab capture.
+    //
+    // Removing it silently was a real hazard: mid-broadcast, a mic dying just made the audio stop with
+    // no trace anywhere — the source vanished from the UI, the encoder kept producing a full-bitrate
+    // stream, and every platform reported perfect health. For a prayer broadcast that's the worst
+    // failure there is, so tell the server (and thus the alert webhook) on the way out.
     input.stream.getAudioTracks().forEach((t) => {
-      t.addEventListener('ended', () => removeSource(id));
+      t.addEventListener('ended', () => {
+        void api.reportStudioAlert({
+          kind: 'track_ended',
+          subject: input.label,
+          message: `Audio source "${input.label}" ended (device disconnected or stopped) and has been ` +
+            'removed from the mix. If this was the only microphone, the broadcast now has NO AUDIO.',
+        }).catch(() => { /* never disturb a live stream */ });
+        removeSource(id);
+      });
     });
 
     setSources((prev) => [
       ...prev,
-      { id, label: input.label, kind: input.kind, deviceId: input.deviceId, gain: 1, muted: false },
+      { id, label: input.label, kind: input.kind, deviceId: input.deviceId, gain: 1, muted: false, stream: input.stream },
     ]);
 
     // The add button is a user gesture — safe to (re)start a suspended context here.

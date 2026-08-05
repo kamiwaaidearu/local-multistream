@@ -10,6 +10,7 @@ import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../pla
 import { getReminderSettings, computeReminderTime, renderReminder } from './reminders.js';
 import { startHealthMonitor, stopHealthMonitor, waitForPlatformReceiving } from './healthMonitor.js';
 import { decidePreflight } from './authPreflight.js';
+import { sendAlert } from '../alerts.js';
 import { mayPublishToFacebook, shouldDeleteFacebookVideoOnEnd } from './testStreamPolicy.js';
 import type { Stream, PlatformStream, Platform } from '../types.js';
 
@@ -655,6 +656,9 @@ async function publishFacebookAndAnnounce(streamId: string, stream: Stream, fbPs
   logEvent(streamId, 'facebook', 'ingest_unconfirmed',
     'Facebook did not report an incoming stream within 45s of publishing — announcement post suppressed. ' +
     'The broadcast is live but may be showing nothing; check the health panel.');
+  sendAlert('ingest_unconfirmed', 'facebook',
+    'Published, but Facebook never reported receiving video within 45s. The announcement post was ' +
+    'suppressed, so nobody has been sent a link. Facebook is probably showing nothing.');
 }
 
 /**

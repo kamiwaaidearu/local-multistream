@@ -30,6 +30,8 @@ interface PlatformIngestHealth {
   fps: number | null;
   warnings: string[];
   alarm: boolean;
+  /** Video is arriving but the platform reports no audio — a silent broadcast. */
+  audioAlarm: boolean;
 }
 
 const healthLabels: Record<PlatformIngestHealth['state'], { color: string; label: string }> = {
@@ -72,11 +74,30 @@ export function PlatformStatusCard({
   // leg that is "live" by our reckoning while the platform receives nothing is the exact failure that
   // went unnoticed for 24 minutes on 2026-08-05.
   const alarming = Object.entries(health ?? {}).filter(([, h]) => h.alarm || h.state === 'not_receiving');
+  // Silent audio gets its own banner rather than being folded into the not-receiving one: the video is
+  // fine, the fix is completely different (check the mic, not the network), and for a prayer broadcast
+  // it's the more serious of the two.
+  const silent = Object.entries(health ?? {}).filter(([, h]) => h.audioAlarm);
 
   return (
     <Card withBorder>
       <Stack>
         <Text fw={500}>Platform Status</Text>
+
+        {isLive && silent.length > 0 && (
+          <Alert color="red" title="NO AUDIO — the broadcast is silent">
+            <Stack gap={4}>
+              <Text size="sm">
+                {silent.map(([p]) => p).join(', ')} {silent.length === 1 ? 'reports' : 'report'} video
+                arriving with no audio.
+              </Text>
+              <Text size="xs" c="dimmed">
+                Check that a microphone is added below, that it isn't muted, and that its level meter is
+                moving. The video will keep looking perfect while this is wrong.
+              </Text>
+            </Stack>
+          </Alert>
+        )}
 
         {isLive && alarming.length > 0 && (
           <Alert color="red" title="A platform is not receiving your video">

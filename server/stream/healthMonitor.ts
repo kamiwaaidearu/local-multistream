@@ -1,5 +1,6 @@
 import { getDb } from '../db/index.js';
 import { isRtmpPublishing } from '../rtmp/server.js';
+import { sendAlert, clearAlert } from '../alerts.js';
 import { getFacebookIngestHealth } from '../platforms/facebook.js';
 import { getYouTubeStreamHealth } from '../platforms/youtube.js';
 import { isTwitchLive } from '../platforms/twitch.js';
@@ -49,6 +50,12 @@ export interface PlatformHealth {
   warnings: string[];
   /** True once auto-recovery is exhausted and the operator needs to act. */
   alarm: boolean;
+  /**
+   * Video is arriving but the platform reports no audio. Tracked separately from `alarm` because
+   * restarting a leg cannot fix a muted mic — and because for a prayer broadcast, a silent stream is
+   * the worst possible failure while being invisible to every other signal we have.
+   */
+  audioAlarm: boolean;
   checkedAt: number;
 }
 
@@ -85,9 +92,12 @@ function logEvent(streamId: string, platform: string | null, event: string, deta
 async function sample(ps: PlatformStream): Promise<{ sample: HealthSample; detail: Partial<PlatformHealth> }> {
   if (ps.platform === 'facebook') {
     if (!ps.broadcast_id) {
-      return { sample: { receiving: false, probeFailed: true, warnings: [] }, detail: {} };
+      return { sample: { receiving: false, probeFailed: true, warnings: [], audioMissing: null }, detail: {} };
     }
     const h = await getFacebookIngestHealth(ps.broadcast_id);
+    // Facebook reports audio_bitrate alongside video, so a silent broadcast is directly observable:
+    // video arriving with zero/absent audio. Only meaningful while video IS arriving.
+    const audioMissing = h.receiving ? (h.audioKbps === null || h.audioKbps <= 0) : null;
     const warnings: string[] = [];
     // Facebook's documented ceilings; exceeding them is a real risk of it refusing to produce video.
     if (h.videoKbps !== null && h.videoKbps > FACEBOOK_BITRATE_WARN_KBPS) {
@@ -95,7 +105,7 @@ async function sample(ps: PlatformStream): Promise<{ sample: HealthSample; detai
     }
     if (h.gopMs !== null && h.gopMs > 2000) warnings.push(`keyframeIntervalTooLong (${h.gopMs} ms > 2000)`);
     return {
-      sample: { receiving: h.receiving, probeFailed: h.error !== null, warnings },
+      sample: { receiving: h.receiving, probeFailed: h.error !== null, warnings, audioMissing },
       detail: { videoKbps: h.videoKbps, audioKbps: h.audioKbps, fps: h.fps, warnings },
     };
   }
@@ -103,12 +113,14 @@ async function sample(ps: PlatformStream): Promise<{ sample: HealthSample; detai
   if (ps.platform === 'youtube') {
     const streamId = ps.extra_json ? (JSON.parse(ps.extra_json) as { stream_id?: string }).stream_id : undefined;
     if (!streamId) {
-      return { sample: { receiving: false, probeFailed: true, warnings: [] }, detail: {} };
+      return { sample: { receiving: false, probeFailed: true, warnings: [], audioMissing: null }, detail: {} };
     }
     const h = await getYouTubeStreamHealth(streamId);
     const warnings = h.issues.map((i) => i.type || i.reason);
+    // YouTube names this condition itself, so we don't have to infer it from a bitrate.
+    const audioMissing = h.receiving ? h.issues.some((i) => i.type === 'noAudioStream') : null;
     return {
-      sample: { receiving: h.receiving, probeFailed: h.error !== null, warnings },
+      sample: { receiving: h.receiving, probeFailed: h.error !== null, warnings, audioMissing },
       detail: { warnings },
     };
   }
@@ -116,9 +128,10 @@ async function sample(ps: PlatformStream): Promise<{ sample: HealthSample; detai
   // Twitch exposes no ingest health, so "is the channel live" is the best available signal.
   try {
     const live = await isTwitchLive();
-    return { sample: { receiving: live, probeFailed: false, warnings: [] }, detail: {} };
+    // Twitch exposes no audio information, so audio state stays unknown for this platform.
+    return { sample: { receiving: live, probeFailed: false, warnings: [], audioMissing: null }, detail: {} };
   } catch {
-    return { sample: { receiving: false, probeFailed: true, warnings: [] }, detail: {} };
+    return { sample: { receiving: false, probeFailed: true, warnings: [], audioMissing: null }, detail: {} };
   }
 }
 
@@ -145,7 +158,8 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
     const tracked = monitor.platforms.get(platform) ?? {
       consecutiveBad: 0,
       restarts: 0,
-      health: { state: 'unknown', reason: 'Not yet checked', videoKbps: null, audioKbps: null, fps: null, pushKbps: null, warnings: [], alarm: false, checkedAt: 0 },
+      consecutiveNoAudio: 0,
+      health: { state: 'unknown', reason: 'Not yet checked', videoKbps: null, audioKbps: null, fps: null, pushKbps: null, warnings: [], alarm: false, audioAlarm: false, checkedAt: 0 },
     };
 
     const { sample: s, detail } = await sample(ps);
@@ -156,11 +170,16 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
 
     const decision = decideHealthAction({
       sample: sourcePresent ? s : { ...s, probeFailed: true },
-      counters: { consecutiveBad: tracked.consecutiveBad, restarts: tracked.restarts },
+      counters: {
+        consecutiveBad: tracked.consecutiveBad,
+        restarts: tracked.restarts,
+        consecutiveNoAudio: tracked.consecutiveNoAudio,
+      },
       legAgeMs,
     });
 
     const previous = tracked.health.state;
+    const audioAlarmWasSet = tracked.health.audioAlarm;
     const health: PlatformHealth = {
       state: decision.state,
       reason: sourcePresent ? decision.reason : 'Local video source is absent — platform health not meaningful',
@@ -170,10 +189,30 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
       pushKbps: legPushKbps(streamId, platform),
       warnings: detail.warnings ?? [],
       alarm: decision.action === 'alarm' || (tracked.health.alarm && decision.state === 'not_receiving'),
+      audioAlarm: decision.audioAlarm,
       checkedAt: Date.now(),
     };
 
-    monitor.platforms.set(platform, { consecutiveBad: decision.consecutiveBad, restarts: decision.restarts, health });
+    monitor.platforms.set(platform, {
+      consecutiveBad: decision.consecutiveBad,
+      restarts: decision.restarts,
+      consecutiveNoAudio: decision.consecutiveNoAudio,
+      health,
+    });
+
+    // Silent audio: for a prayer broadcast this is the worst outcome there is, and it is invisible to
+    // every other signal — a muted mic still produces a full-bitrate, full-framerate picture. Alert on
+    // the transition, and clear the suppression on recovery so a later recurrence alerts again.
+    if (decision.audioAlarm && !audioAlarmWasSet) {
+      const detailText = `${platform} is receiving video but NO AUDIO — check the microphone and the studio mixer`;
+      logEvent(streamId, platform, 'audio_missing', detailText);
+      console.error(`[health] ALARM ${detailText}`);
+      sendAlert('audio_missing', platform, detailText);
+    } else if (!decision.audioAlarm && audioAlarmWasSet) {
+      logEvent(streamId, platform, 'audio_recovered', `${platform} audio is present again`);
+      console.log(`[health] ${platform} audio is present again`);
+      clearAlert('audio_missing', platform);
+    }
 
     // Only log genuine transitions — a 20s poll would otherwise write thousands of rows per stream.
     if (decision.state !== previous && decision.state !== 'unknown') {
@@ -188,6 +227,11 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
     } else if (decision.action === 'alarm') {
       logEvent(streamId, platform, 'health_alarm', decision.reason);
       console.error(`[health] ALARM ${platform}: ${decision.reason}`);
+      const pushing = health.pushKbps !== null ? ` We are sending ${health.pushKbps} kbps.` : '';
+      sendAlert('health_alarm', platform, `${decision.reason}.${pushing}`);
+    } else if (decision.state === 'healthy' && previous === 'not_receiving') {
+      // Recovered — allow a future outage on this platform to alert again.
+      clearAlert('health_alarm', platform);
     }
   }
 }
