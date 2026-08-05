@@ -44,13 +44,16 @@ interface StudioSourcePanelProps {
    */
   autoTestConnection?: boolean;
   /**
-   * When true, the transport never stops auto-reconnecting (capped backoff). The parent passes this
-   * while the broadcast is live so a longer network dip self-heals instead of going terminal.
+   * The BROADCAST is live server-side (distinct from the studio socket merely being connected).
+   *
+   * Drives two things: the transport never stops auto-reconnecting, so a longer network dip self-heals
+   * instead of going terminal; and the quality-lock wording, which has to differ because ending a live
+   * broadcast is irreversible whereas disconnecting an idle studio is not.
    */
-  keepReconnecting?: boolean;
+  streamIsLive?: boolean;
 }
 
-export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection, keepReconnecting }: StudioSourcePanelProps) {
+export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection, streamIsLive }: StudioSourcePanelProps) {
   const [template, setTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
   const [savedTemplate, setSavedTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
 
@@ -293,7 +296,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     compositeVideoStream: compositeStream,
     mixedAudioStream: mixedStream,
     videoBitsPerSecond: QUALITY_PRESETS[quality].videoBps,
-    keepReconnecting,
+    keepReconnecting: streamIsLive,
   });
 
   // Watch every capture track for death or silence. Gated on 'connected': before that the operator is
@@ -741,7 +744,15 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
             </Text>
           )}
           {live && (
-            <Text size="xs" c="dimmed">Quality is locked while you’re live — stop the stream to change it.</Text>
+            <Text size="xs" c="dimmed">
+              {streamIsLive
+                // Ending a live broadcast is irreversible ("cannot be restarted or resumed"), so never
+                // suggest it as the way to change a setting. MediaRecorder's bitrate is fixed at
+                // construction, so mid-broadcast really is not possible.
+                ? 'Quality can’t be changed mid-broadcast.'
+                // Not live yet: disconnecting the studio is safe and is the actual fix.
+                : 'Quality is set when you connect — disconnect the studio to change it.'}
+            </Text>
           )}
         </Stack>
       </Card>

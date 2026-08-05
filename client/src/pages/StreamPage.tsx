@@ -621,7 +621,7 @@ export function StreamPage() {
           onConnectRef={studioConnectRef}
           onDisconnectRef={studioDisconnectRef}
           autoTestConnection={isReady}
-          keepReconnecting={isLive}
+          streamIsLive={isLive}
         />
       )}
 

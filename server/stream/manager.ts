@@ -637,10 +637,15 @@ async function transitionYouTubeWithRetry(streamId: string, ytPs: PlatformStream
       logEvent(streamId, 'youtube', 'transition_error', `Attempt ${attempt}/${ATTEMPTS}: ${msg}`);
 
       if (attempt === ATTEMPTS) {
-        db.prepare("UPDATE platform_streams SET error_message = ? WHERE id = ?").run(
-          `Could not confirm the go-live transition (${msg}). Autostart should have taken the broadcast live anyway — check the health panel.`,
+        // Say what's true, not what's comforting. An earlier version claimed autostart would have
+        // covered this; it was observed telling the operator that while the broadcast sat at `ready`
+        // and never went live. A failed transition means YouTube is NOT live until someone acts.
+        db.prepare("UPDATE platform_streams SET status = 'error', error_message = ? WHERE id = ?").run(
+          `YouTube did not go live: ${msg}. Use "Retry go-live" below, or start it manually in YouTube Studio.`,
           ytPs.id,
         );
+        logEvent(streamId, 'youtube', 'not_live', `Transition failed ${ATTEMPTS}x — broadcast is not live`);
+        sendAlert('health_alarm', 'youtube', `Not live — the go-live transition failed: ${msg}`);
         return;
       }
       await new Promise((r) => setTimeout(r, 10_000));

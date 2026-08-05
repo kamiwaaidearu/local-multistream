@@ -58,9 +58,11 @@ function bitrateLabel(h: PlatformIngestHealth): { text: string; hint: string } |
     return { text: `${h.videoKbps} kbps`, hint: `${h.videoKbps} kbps measured by the platform itself` };
   }
   if (h.pushKbps !== null) {
+    // Spell it out rather than using a bare arrow. "receiving · ↑6009 kbps" reads as though the
+    // platform confirmed 6009, which is the exact conflation this function exists to prevent.
     return {
-      text: `↑${h.pushKbps} kbps`,
-      hint: `We are sending ${h.pushKbps} kbps. This platform doesn't report what it receives, so this is our side of the pipe, not theirs.`,
+      text: `we send ${h.pushKbps} kbps`,
+      hint: `We are sending ${h.pushKbps} kbps. This platform doesn't report the rate it receives, so this is our side of the pipe — not confirmation of theirs.`,
     };
   }
   return null;

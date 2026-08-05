@@ -101,14 +101,25 @@ export async function createYouTubeBroadcast(
         scheduledStartTime: startTime,
       },
       contentDetails: {
-        // Autostart ON is a deliberate reliability decision. With it off, going live REQUIRED a
-        // working OAuth token at the exact moment of go-live — a single point of failure that cost
-        // us the 2026-08-05 broadcast, when the refresh token was revoked hours earlier and
-        // liveBroadcasts.transition failed with invalid_grant. With it on, YouTube transitions the
-        // broadcast itself as soon as our RTMP data arrives, so the broadcast goes live even if
-        // every YouTube API call we make fails. transitionToLive still runs (it's idempotent and
-        // tolerates redundantTransition) but is now belt-and-braces rather than load-bearing.
-        enableAutoStart: true,
+        // Autostart OFF. It was briefly enabled to remove the OAuth token from the go-live critical
+        // path, but measurement showed it makes things WORSE in this architecture, so it's reverted:
+        //
+        //  - Turning it on makes the manual transition permanently illegal: liveBroadcasts.transition
+        //    returns 403 invalidTransition from `ready`, and keeps returning it. YouTube reserves the
+        //    ready -> live move for itself.
+        //  - But autostart only fires when the bound stream BECOMES active. We reuse one persistent
+        //    stream across broadcasts (getOrCreateReusableStream) and goLive deliberately waits for the
+        //    ingest to be publishing before it starts, so the stream is almost always active ALREADY.
+        //    No edge, no autostart.
+        //
+        // Observed live on 2026-08-05: broadcast stuck at `ready` with streamStatus `active` and
+        // healthStatus `good`, transition refused on every retry — i.e. unrecoverable. Whereas the
+        // manual transition had succeeded every week for a month (07-08 through 07-29).
+        //
+        // Wednesday's actual root cause — a revoked grant discovered at go-live — is addressed by the
+        // auth watchdog, the hard go-live gate, and validating the REFRESH token rather than a cached
+        // access token. None of those depend on autostart.
+        enableAutoStart: false,
         // Autostop stays OFF: it would end the broadcast on a brief source drop, killing the
         // reconnect window that lets a stream survive the operator's network hiccuping.
         enableAutoStop: false,
@@ -191,15 +202,12 @@ export async function transitionToLive(broadcastId: string, streamId: string): P
     await new Promise((r) => setTimeout(r, 5000));
   }
 
-  // With enableAutoStart on, YouTube may already have taken the broadcast live by itself the moment
-  // our data arrived. Transitioning again would fail with redundantTransition, so check first.
+  // Already live? Nothing to do. (Cheap, and covers a retry after a partial success.)
   if (await isBroadcastLive(yt, broadcastId)) {
-    console.log('[youtube] Broadcast is already live (autostart) — no transition needed');
+    console.log('[youtube] Broadcast is already live — no transition needed');
     return;
   }
 
-  // Transition to live. redundantTransition means YouTube beat us to it between the check above and
-  // this call — that's success, not failure.
   try {
     await yt.liveBroadcasts.transition({
       broadcastStatus: 'live',
@@ -207,9 +215,18 @@ export async function transitionToLive(broadcastId: string, streamId: string): P
       part: ['status'],
     });
   } catch (err) {
-    if (!isRedundantTransition(err)) throw err;
-    console.log('[youtube] Broadcast was already transitioning to live — treating as success');
-    return;
+    // Don't interpret the error reason — ask what state the broadcast is ACTUALLY in. Both
+    // redundantTransition and invalidTransition can mean "someone already moved it", and they can
+    // equally mean a genuine refusal; only the resulting lifecycle tells us which. Guessing from the
+    // reason string is what produced a reassuring "autostart probably handled it" message for a
+    // broadcast that was in fact stuck at `ready` and never went live.
+    const state = await broadcastLifeCycle(yt, broadcastId);
+    if (state === 'live' || state === 'liveStarting') {
+      console.log(`[youtube] Transition rejected but broadcast is ${state} — treating as success`);
+      return;
+    }
+    console.error(`[youtube] Transition failed and broadcast is still "${state}" — it is NOT live`);
+    throw err;
   }
 
   // Poll for live confirmation (max 60s)
@@ -221,26 +238,26 @@ export async function transitionToLive(broadcastId: string, streamId: string): P
   }
 }
 
-/** Is this broadcast already in the live state? Best-effort — a read failure returns false so the
- *  caller still attempts the transition rather than assuming success. */
-async function isBroadcastLive(yt: ReturnType<typeof getYouTube>, broadcastId: string): Promise<boolean> {
+/**
+ * The broadcast's current lifeCycleStatus (created / ready / testing / live / complete / revoked), or
+ * 'unknown' when it can't be read.
+ *
+ * This is the authoritative answer to "did it actually go live", and is deliberately used INSTEAD of
+ * interpreting transition error reasons — see the catch block in transitionToLive.
+ */
+async function broadcastLifeCycle(yt: ReturnType<typeof getYouTube>, broadcastId: string): Promise<string> {
   try {
     const res = await yt.liveBroadcasts.list({ id: [broadcastId], part: ['status'] });
-    return res.data.items?.[0]?.status?.lifeCycleStatus === 'live';
+    return res.data.items?.[0]?.status?.lifeCycleStatus ?? 'unknown';
   } catch {
-    return false;
+    return 'unknown';
   }
 }
 
-/**
- * Does this error mean "the broadcast is already live/transitioning"? YouTube reports that as the
- * `redundantTransition` reason, which is an expected outcome now that enableAutoStart is on — the
- * broadcast going live without us is the whole point.
- */
-function isRedundantTransition(err: unknown): boolean {
-  const e = err as { errors?: { reason?: string }[]; message?: string };
-  if (e?.errors?.some((x) => x.reason === 'redundantTransition')) return true;
-  return /redundantTransition/i.test(e?.message ?? '');
+/** Is this broadcast already live? Best-effort — a read failure returns false so the caller still
+ *  attempts the transition rather than assuming success. */
+async function isBroadcastLive(yt: ReturnType<typeof getYouTube>, broadcastId: string): Promise<boolean> {
+  return (await broadcastLifeCycle(yt, broadcastId)) === 'live';
 }
 
 /** YouTube's own view of the ingest stream, from liveStreams.status. */
