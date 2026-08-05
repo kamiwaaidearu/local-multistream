@@ -153,7 +153,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
 
   // Audio mixer — N independent sources (mics, desktop audio, slide audio), each with its own
   // volume / mute / meter, summed into one track for the encoder.
-  const { mixedStream, sources, levels, addSource, removeSource, setGain, setMuted, resume } = useAudioMixer();
+  const { mixedStream, sources, levels, addSource, removeSource, setGain, setMuted, resume, ensureRunning } = useAudioMixer();
 
   // Track the slide-audio source so we can drop it from the mix when the screen share stops.
   const slideSourceIdRef = useRef<string | null>(null);
@@ -394,15 +394,36 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     return () => window.clearTimeout(id);
   }, [autoTestConnection, handleTestConnection]);
 
+  /**
+   * Connect, having first made sure the audio mix bus is actually running.
+   *
+   * MediaRecorder is always handed the mix bus's audio track, even with zero audio sources. If the
+   * AudioContext is still suspended, that track produces no samples and Chrome's muxer waits forever to
+   * interleave — `ondataavailable` never fires, nothing is sent, and the ingest FFmpeg blocks on an
+   * empty stdin at 0% CPU. The only visible symptom was go-live failing 15s later with "no video has
+   * started flowing yet". Until now only ADDING a source resumed the context, so connecting with just
+   * the canvas (no camera, no mic) could never stream. Connecting is a user gesture, which is exactly
+   * when a resume is permitted.
+   */
+  const connectWithAudioRunning = useCallback(() => {
+    void ensureRunning().then((running) => {
+      if (!running) {
+        // Not fatal — video may still record — but it's the prime suspect if nothing flows.
+        console.warn('[studio] Audio mix bus is not running; the browser may not produce any media');
+      }
+      studioConnect();
+    });
+  }, [ensureRunning, studioConnect]);
+
   // Expose connect/disconnect to parent via refs
   useEffect(() => {
-    if (onConnectRef) onConnectRef.current = studioConnect;
+    if (onConnectRef) onConnectRef.current = connectWithAudioRunning;
     if (onDisconnectRef) onDisconnectRef.current = studioDisconnect;
     return () => {
       if (onConnectRef) onConnectRef.current = null;
       if (onDisconnectRef) onDisconnectRef.current = null;
     };
-  }, [studioConnect, studioDisconnect, onConnectRef, onDisconnectRef]);
+  }, [connectWithAudioRunning, studioDisconnect, onConnectRef, onDisconnectRef]);
 
   // Template editor handlers
   const handleSaveTemplate = useCallback(async () => {

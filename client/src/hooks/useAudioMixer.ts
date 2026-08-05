@@ -45,6 +45,17 @@ interface UseAudioMixerResult {
   setMuted: (id: string, muted: boolean) => void;
   /** Resume the AudioContext from a user gesture (it may start suspended → silent). */
   resume: () => void;
+  /**
+   * Resume the context and report whether it is actually running.
+   *
+   * Must be called before recording starts, even with zero audio sources. The mix bus always exposes
+   * one audio track, and MediaRecorder is always handed it — but a SUSPENDED context produces no
+   * samples on that track, and Chrome's WebM muxer then waits forever to interleave, so
+   * `ondataavailable` never fires and the whole stream silently produces nothing. Adding a source used
+   * to be the only thing that resumed the context, which made "stream the canvas with no camera or
+   * mic" impossible for a non-obvious reason.
+   */
+  ensureRunning: () => Promise<boolean>;
 }
 
 /**
@@ -108,6 +119,21 @@ export function useAudioMixer(): UseAudioMixerResult {
     if (ctx && ctx.state === 'suspended') {
       void ctx.resume().catch(() => {});
     }
+  }, []);
+
+  // See UseAudioMixerResult.ensureRunning. Awaited before recording so the mix bus is genuinely
+  // producing samples — a suspended context silently stalls MediaRecorder entirely.
+  const ensureRunning = useCallback(async (): Promise<boolean> => {
+    const ctx = audioCtxRef.current;
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') {
+      try {
+        await ctx.resume();
+      } catch {
+        return false;
+      }
+    }
+    return ctx.state === 'running';
   }, []);
 
   const removeSource = useCallback((id: string) => {
@@ -201,5 +227,5 @@ export function useAudioMixer(): UseAudioMixerResult {
     setSources((prev) => prev.map((s) => (s.id === id ? { ...s, muted } : s)));
   }, []);
 
-  return { mixedStream, sources, levels, addSource, removeSource, setGain, setMuted, resume };
+  return { mixedStream, sources, levels, addSource, removeSource, setGain, setMuted, resume, ensureRunning };
 }

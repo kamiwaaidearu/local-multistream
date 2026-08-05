@@ -148,13 +148,36 @@ export function useStudioStream({
       });
       recorderRef.current = recorder;
 
+      // If MediaRecorder never produces a chunk, nothing downstream can tell you why: the socket looks
+      // connected, the ingest FFmpeg blocks on an empty stdin at 0% CPU, and the only symptom is
+      // go-live failing 15s later with "no video has started flowing yet". Most likely cause is a
+      // stalled muxer — e.g. an audio track from a suspended AudioContext that never yields samples.
+      // Surface it as a real error instead of hanging silently.
+      let producedData = false;
+      const stallTimer = window.setTimeout(() => {
+        if (producedData) return;
+        fatalRef.current = true;
+        setError(
+          'The browser is not producing any video. Check that the preview below shows a picture, then ' +
+          'reconnect. (If you have no camera or microphone added, reconnect once more — the audio ' +
+          'engine needs a click to start.)',
+        );
+        setStatus('error');
+        cleanup();
+      }, 6000);
+
       recorder.ondataavailable = (e) => {
-        if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-          ws.send(e.data);
+        if (e.data.size > 0) {
+          if (!producedData) {
+            producedData = true;
+            window.clearTimeout(stallTimer);
+          }
+          if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
         }
       };
 
       recorder.onerror = () => {
+        window.clearTimeout(stallTimer);
         // A recorder error is local and fatal — don't try to reconnect.
         fatalRef.current = true;
         setError('MediaRecorder error');
