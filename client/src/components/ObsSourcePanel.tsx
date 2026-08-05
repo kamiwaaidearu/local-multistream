@@ -62,7 +62,11 @@ export function ObsSourcePanel({ sourceConnected, sourceType }: ObsSourcePanelPr
         </Group>
 
         <Alert title="Recommended OBS Settings" variant="light">
-          1080p, 4500-6000 kbps, H.264, CBR, Keyframe Interval: 2s, 30fps
+          1080p, 6000 kbps, H.264, CBR, Keyframe Interval: 2s, 30fps
+          <Text size="xs" c="dimmed" mt={4}>
+            Push 6000 and let the server handle each platform: it passes this straight through to
+            YouTube and Twitch, and re-encodes down to 4000 for Facebook, whose limit is lower.
+          </Text>
         </Alert>
       </Stack>
     </Card>
