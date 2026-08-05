@@ -41,6 +41,31 @@ const healthLabels: Record<PlatformIngestHealth['state'], { color: string; label
   unknown: { color: 'gray', label: 'checking…' },
 };
 
+/**
+ * The bitrate to show for a platform, and which side of the pipe it came from.
+ *
+ * Platforms differ in what they'll tell us: Facebook's stream_health reports the bitrate it is actually
+ * receiving, while YouTube's liveStreams status reports no numbers at all — only good/ok/bad/noData plus
+ * named issues like videoBitrateLow. So without a fallback, YouTube shows no figure even though our own
+ * ffmpeg knows exactly what it's pushing.
+ *
+ * The two are deliberately labelled differently rather than blended. "We are sending 6000 kbps" and
+ * "they are receiving 6000 kbps" are different claims, and treating the first as evidence of the second
+ * is precisely what hid the 2026-08-05 Facebook failure for 24 minutes.
+ */
+function bitrateLabel(h: PlatformIngestHealth): { text: string; hint: string } | null {
+  if (h.videoKbps !== null) {
+    return { text: `${h.videoKbps} kbps`, hint: `${h.videoKbps} kbps measured by the platform itself` };
+  }
+  if (h.pushKbps !== null) {
+    return {
+      text: `↑${h.pushKbps} kbps`,
+      hint: `We are sending ${h.pushKbps} kbps. This platform doesn't report what it receives, so this is our side of the pipe, not theirs.`,
+    };
+  }
+  return null;
+}
+
 interface PlatformStatusCardProps {
   platforms: PlatformStream[];
   streamStatus: string;
@@ -127,17 +152,21 @@ export function PlatformStatusCard({
                 <Text tt="capitalize" fw={500}>{ps.platform}</Text>
                 <Badge color={statusColors[ps.status] ?? 'gray'} size="sm">{ps.status}</Badge>
                 {/* The platform's own verdict, kept visually distinct from OUR leg status above. */}
-                {isLive && health?.[ps.platform] && (
-                  <Badge
-                    color={healthLabels[health[ps.platform].state].color}
-                    size="sm"
-                    variant="outline"
-                    title={health[ps.platform].reason}
-                  >
-                    {healthLabels[health[ps.platform].state].label}
-                    {health[ps.platform].videoKbps !== null && ` · ${health[ps.platform].videoKbps} kbps`}
-                  </Badge>
-                )}
+                {isLive && health?.[ps.platform] && (() => {
+                  const h = health[ps.platform];
+                  const rate = bitrateLabel(h);
+                  return (
+                    <Badge
+                      color={healthLabels[h.state].color}
+                      size="sm"
+                      variant="outline"
+                      title={rate ? `${h.reason} — ${rate.hint}` : h.reason}
+                    >
+                      {healthLabels[h.state].label}
+                      {rate && ` · ${rate.text}`}
+                    </Badge>
+                  );
+                })()}
               </Group>
               <Group gap="xs">
                 {ps.error_message && (
