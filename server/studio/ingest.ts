@@ -284,9 +284,46 @@ function handleConnection(ws: WebSocket): void {
     try { ws.ping(); } catch { /* ignore */ }
   }, HEARTBEAT_INTERVAL_MS);
 
+  // Whether the browser is actually SENDING webm is a distinct question from whether the socket is
+  // connected, and we had no visibility into it at all. When the browser sends nothing, the ingest
+  // FFmpeg simply blocks forever on read(stdin) — silent, zero CPU, no stderr, no exit — and the only
+  // symptom is go-live failing 15s later with "no video has started flowing yet", which describes the
+  // effect rather than the cause. These counters name the cause.
+  let bytesIn = 0;
+  let chunksIn = 0;
+  let loggedFirstChunk = false;
+
+  // If nothing arrives shortly after connecting, the fault is browser-side (no composite frames, a
+  // MediaRecorder that never started, a codec the browser refused). Say so explicitly.
+  const noDataTimer = setTimeout(() => {
+    if (bytesIn === 0) {
+      console.error(
+        '[studio] NO VIDEO DATA received from the browser after 8s — the socket is connected but the ' +
+        'browser is sending nothing. Check the Studio preview is showing a picture, and the browser ' +
+        'console for MediaRecorder errors. Go Live will fail until data flows.',
+      );
+    }
+  }, 8000);
+
+  // Periodic throughput, so a stream that starts and then stalls is visible too.
+  const throughputTimer = setInterval(() => {
+    if (activeWs !== ws) return;
+    const idleMs = Date.now() - activeWsLastDataAt;
+    if (idleMs > 5000) {
+      console.warn(`[studio] No webm from the browser for ${Math.round(idleMs / 1000)}s (${chunksIn} chunks, ${(bytesIn / 1024 / 1024).toFixed(1)} MB total)`);
+    }
+  }, 15000);
+
   ws.on('message', (data: Buffer) => {
     // Binary WebSocket messages are webm chunks — pipe directly to FFmpeg stdin
     if (activeWs === ws) activeWsLastDataAt = Date.now(); // liveness for takeover staleness checks
+    bytesIn += data.length;
+    chunksIn++;
+    if (!loggedFirstChunk) {
+      loggedFirstChunk = true;
+      clearTimeout(noDataTimer);
+      console.log(`[studio] First webm chunk received (${data.length} bytes) — the browser is sending video`);
+    }
     if (ingestFfmpeg?.stdin?.writable) {
       try {
         ingestFfmpeg.stdin.write(data);
@@ -297,8 +334,10 @@ function handleConnection(ws: WebSocket): void {
   });
 
   ws.on('close', () => {
-    console.log('[studio] WebSocket disconnected');
+    console.log(`[studio] WebSocket disconnected after ${chunksIn} chunks / ${(bytesIn / 1024 / 1024).toFixed(1)} MB of webm`);
     clearInterval(heartbeat);
+    clearTimeout(noDataTimer);
+    clearInterval(throughputTimer);
     if (activeWs === ws) {
       activeWs = null;
       stopIngestFfmpeg();
@@ -308,6 +347,8 @@ function handleConnection(ws: WebSocket): void {
   ws.on('error', (err) => {
     console.error('[studio] WebSocket error:', err);
     clearInterval(heartbeat);
+    clearTimeout(noDataTimer);
+    clearInterval(throughputTimer);
     if (activeWs === ws) {
       activeWs = null;
       stopIngestFfmpeg();
