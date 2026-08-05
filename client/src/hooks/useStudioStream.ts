@@ -150,9 +150,9 @@ export function useStudioStream({
 
       // If MediaRecorder never produces a chunk, nothing downstream can tell you why: the socket looks
       // connected, the ingest FFmpeg blocks on an empty stdin at 0% CPU, and the only symptom is
-      // go-live failing 15s later with "no video has started flowing yet". Most likely cause is a
-      // stalled muxer — e.g. an audio track from a suspended AudioContext that never yields samples.
-      // Surface it as a real error instead of hanging silently.
+      // go-live failing 15s later with "no video has started flowing yet". The known cause is an audio
+      // track whose graph renders nothing, which makes the WebM muxer block waiting to interleave (see
+      // useAudioMixer's silent keepalive). Surface it as a real error instead of hanging silently.
       let producedData = false;
       const stallTimer = window.setTimeout(() => {
         if (producedData) return;

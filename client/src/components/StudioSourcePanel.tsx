@@ -397,13 +397,13 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   /**
    * Connect, having first made sure the audio mix bus is actually running.
    *
-   * MediaRecorder is always handed the mix bus's audio track, even with zero audio sources. If the
-   * AudioContext is still suspended, that track produces no samples and Chrome's muxer waits forever to
-   * interleave — `ondataavailable` never fires, nothing is sent, and the ingest FFmpeg blocks on an
-   * empty stdin at 0% CPU. The only visible symptom was go-live failing 15s later with "no video has
-   * started flowing yet". Until now only ADDING a source resumed the context, so connecting with just
-   * the canvas (no camera, no mic) could never stream. Connecting is a user gesture, which is exactly
-   * when a resume is permitted.
+   * MediaRecorder is always handed the mix bus track, even with zero audio sources, and a graph that
+   * isn't rendering stalls the muxer — no chunks at all, not merely no audio. Connecting is a user
+   * gesture, which is exactly when resuming a suspended context is permitted.
+   *
+   * (The canvas-only failure was NOT caused by suspension — the context was already running. That was a
+   * destination node with no inputs; see the silent keepalive in useAudioMixer. This guard remains
+   * because a genuinely suspended context would stall the stream the same way.)
    */
   const connectWithAudioRunning = useCallback(() => {
     void ensureRunning().then((running) => {

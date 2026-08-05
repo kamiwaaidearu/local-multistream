@@ -48,12 +48,11 @@ interface UseAudioMixerResult {
   /**
    * Resume the context and report whether it is actually running.
    *
-   * Must be called before recording starts, even with zero audio sources. The mix bus always exposes
-   * one audio track, and MediaRecorder is always handed it — but a SUSPENDED context produces no
-   * samples on that track, and Chrome's WebM muxer then waits forever to interleave, so
-   * `ondataavailable` never fires and the whole stream silently produces nothing. Adding a source used
-   * to be the only thing that resumed the context, which made "stream the canvas with no camera or
-   * mic" impossible for a non-obvious reason.
+   * Belt-and-braces before recording: a suspended context renders nothing, and MediaRecorder is always
+   * handed the mix bus track, so it would stall. NOTE this is not what caused the canvas-only stream to
+   * produce zero chunks — the context was already `running` in that case; the destination simply had no
+   * inputs. See the silent keepalive in the setup effect for that. Both are needed: one guarantees the
+   * graph is running, the other guarantees it has something to render.
    */
   ensureRunning: () => Promise<boolean>;
 }
@@ -81,6 +80,26 @@ export function useAudioMixer(): UseAudioMixerResult {
 
     const destination = ctx.createMediaStreamDestination();
     destinationRef.current = destination;
+
+    // Keep the mix bus producing samples even with ZERO sources connected.
+    //
+    // A MediaStreamAudioDestinationNode with no inputs emits no samples at all — not even silence. Its
+    // track exists and reports live/unmuted, but Chrome's WebM muxer then blocks forever waiting to
+    // interleave audio with video, so MediaRecorder produces NO chunks whatsoever. The whole broadcast
+    // silently sends nothing, and the only symptom is go-live failing 15s later complaining about video.
+    //
+    // Verified in the browser on the real canvas, same context and video track, only this differing:
+    //   destination with no inputs        → 0 chunks
+    //   destination + this silent source  → 2 chunks / 16 KB in 2.5s
+    //
+    // A ConstantSourceNode at offset 0 is true silence but an ACTIVE input, so the destination always
+    // renders. This also protects the live case: removing the last microphone mid-broadcast would
+    // otherwise leave the bus input-less and stall the entire stream, not merely mute it.
+    const keepalive = ctx.createConstantSource();
+    keepalive.offset.value = 0;
+    keepalive.connect(destination);
+    keepalive.start();
+
     setMixedStream(destination.stream);
 
     // Per-source metering: read each source's analyser and publish an RMS level.
@@ -100,6 +119,8 @@ export function useAudioMixer(): UseAudioMixerResult {
 
     return () => {
       window.clearInterval(levelIntervalRef.current);
+      try { keepalive.stop(); } catch { /* ignore */ }
+      try { keepalive.disconnect(); } catch { /* ignore */ }
       nodesRef.current.forEach((node) => {
         try { node.sourceNode.disconnect(); } catch { /* ignore */ }
         try { node.gainNode.disconnect(); } catch { /* ignore */ }
