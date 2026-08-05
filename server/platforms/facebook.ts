@@ -91,11 +91,93 @@ export async function resolveFacebookVideoId(liveVideoId: string): Promise<strin
   return match ? match[1] : null;
 }
 
+/** Facebook's own measurement of what it is receiving on the ingest stream. */
+export interface FacebookIngestHealth {
+  /** FB's live-video status (LIVE, LIVE_STOPPED, UNPUBLISHED, VOD, …), or null if not reported. */
+  status: string | null;
+  /** True when FB reports an ingest stream carrying a non-zero video bitrate. The authoritative
+   *  "is Facebook actually getting our video" signal — see getFacebookIngestHealth. */
+  receiving: boolean;
+  videoKbps: number | null;
+  audioKbps: number | null;
+  fps: number | null;
+  /** Keyframe interval in milliseconds, as FB measures it. Must stay <= 2000. */
+  gopMs: number | null;
+  width: number | null;
+  height: number | null;
+  /** Set when the probe itself failed (network/permissions); health is then unknown, not bad. */
+  error: string | null;
+}
+
+/**
+ * Ask Facebook what it is actually receiving, via `ingest_streams{stream_health}`.
+ *
+ * This is the only trustworthy way to know a Facebook broadcast is working. Our ffmpeg leg exiting
+ * cleanly proves nothing: on 2026-08-05 it pushed for 24 minutes and exited 0 while FB produced a
+ * video of 0:00 duration. Nor does the LIVE_NOW publish returning 200 prove anything — FB published
+ * that empty video happily. Only stream_health reports the bitrate/framerate/GOP FB itself sees.
+ *
+ * `receiving` is false when FB reports no ingest stream or a zero video bitrate. A failed request
+ * leaves `receiving` false but sets `error`, so callers can distinguish "FB says nothing is arriving"
+ * from "we couldn't ask" and avoid acting on a blip in our own connectivity.
+ *
+ * Ref: https://developers.facebook.com/docs/live-video-api/guides/backup_stream (stream_health
+ * fields: video_bitrate, video_framerate, video_gop_size, video_width, video_height, audio_bitrate —
+ * bitrates in bits/sec, gop in ms).
+ */
+export async function getFacebookIngestHealth(liveVideoId: string): Promise<FacebookIngestHealth> {
+  const unknown = (error: string): FacebookIngestHealth => ({
+    status: null, receiving: false, videoKbps: null, audioKbps: null,
+    fps: null, gopMs: null, width: null, height: null, error,
+  });
+
+  let data: {
+    status?: string;
+    ingest_streams?: { is_master?: boolean; stream_health?: Record<string, number> }[];
+  };
+  try {
+    const params = new URLSearchParams({
+      fields: 'status,ingest_streams{is_master,stream_health}',
+      access_token: getPageAuth().accessToken,
+    });
+    const res = await fetch(`${API}/${liveVideoId}?${params}`);
+    if (!res.ok) return unknown(await errorMessage(res));
+    data = await res.json();
+  } catch (err) {
+    return unknown(err instanceof Error ? err.message : String(err));
+  }
+
+  const streams = data.ingest_streams ?? [];
+  // Prefer the stream FB has designated master; with no backup stream configured there's just one.
+  const health = (streams.find((s) => s.is_master) ?? streams[0])?.stream_health;
+  const num = (v: number | undefined): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? v : null;
+  const kbps = (v: number | undefined): number | null => {
+    const n = num(v);
+    return n === null ? null : Math.round(n / 1000);
+  };
+
+  const videoKbps = kbps(health?.video_bitrate);
+  return {
+    status: data.status ?? null,
+    receiving: videoKbps !== null && videoKbps > 0,
+    videoKbps,
+    audioKbps: kbps(health?.audio_bitrate),
+    fps: num(health?.video_framerate),
+    gopMs: num(health?.video_gop_size),
+    width: num(health?.video_width),
+    height: num(health?.video_height),
+    error: null,
+  };
+}
+
 /**
  * Take a Facebook live video live. Per the Live Video API, an UNPUBLISHED video is "not visible
- * to other users" until it's transitioned to LIVE_NOW via POST /{live-video-id}. The transition
- * only succeeds once the stream URL is
- * already receiving data — so this must be called *after* the fan-out has started pushing.
+ * to other users" until it's transitioned to LIVE_NOW via POST /{live-video-id}.
+ *
+ * IMPORTANT: this returning 200 does NOT mean Facebook is receiving video. We used to publish on a
+ * blind 4-second timer and treat success as proof of ingest; on 2026-08-05 that published an empty
+ * video and announced it publicly. Callers must confirm ingest via getFacebookIngestHealth first.
  * Ref: https://developers.facebook.com/docs/live-video-api (status=LIVE_NOW).
  */
 export async function publishFacebookLiveVideo(liveVideoId: string): Promise<void> {

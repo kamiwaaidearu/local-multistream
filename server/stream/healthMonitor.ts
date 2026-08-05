@@ -1,0 +1,219 @@
+import { getDb } from '../db/index.js';
+import { isRtmpPublishing } from '../rtmp/server.js';
+import { getFacebookIngestHealth } from '../platforms/facebook.js';
+import { getYouTubeStreamHealth } from '../platforms/youtube.js';
+import { isTwitchLive } from '../platforms/twitch.js';
+import { decideHealthAction, type HealthCounters, type HealthSample, type HealthState } from './healthPolicy.js';
+import type { Platform, PlatformStream } from '../types.js';
+
+// Per-platform ingest health monitor.
+//
+// The point of this module: until now the only thing we knew about a live broadcast was whether OUR
+// FFmpeg process was still running. That is not the same question as "is the platform receiving
+// video", and on 2026-08-05 the two diverged — Facebook's leg pushed for 24 minutes, exited 0, and
+// Facebook published a video of 0:00 duration. Nobody found out until after the broadcast.
+//
+// So while a stream is live we poll each platform's OWN view of the ingest and act on it: Facebook's
+// ingest_streams{stream_health}, YouTube's liveStreams status.healthStatus, and (Twitch has no
+// ingest-health API) whether the channel is actually live.
+
+/** How often to ask the platforms. Slow enough to be free, fast enough to catch a dead leg in ~1 min. */
+const POLL_INTERVAL_MS = 20_000;
+
+/** Facebook's documented recommended maximum video bitrate. Duplicated from platformEncoding to keep
+ *  this module free of encoder concerns; both cite the same Live API spec. */
+const FACEBOOK_MAX_KBPS = 4000;
+
+export interface PlatformHealth {
+  state: HealthState;
+  reason: string;
+  /** Platform-reported ingest bitrate, when it tells us (Facebook does; YouTube doesn't). */
+  videoKbps: number | null;
+  audioKbps: number | null;
+  fps: number | null;
+  /** What OUR ffmpeg says it's pushing on this leg. Read alongside videoKbps: we're sending but they
+   *  aren't receiving is a very different fault from us not sending at all. */
+  pushKbps: number | null;
+  /** Quality complaints from the platform, e.g. ['videoBitrateLow']. */
+  warnings: string[];
+  /** True once auto-recovery is exhausted and the operator needs to act. */
+  alarm: boolean;
+  checkedAt: number;
+}
+
+interface Tracked extends HealthCounters {
+  health: PlatformHealth;
+}
+
+interface Monitor {
+  timer: NodeJS.Timeout;
+  platforms: Map<Platform, Tracked>;
+}
+
+const monitors = new Map<string, Monitor>();
+
+function logEvent(streamId: string, platform: string | null, event: string, detail?: string): void {
+  getDb().prepare('INSERT INTO event_log (stream_id, platform, event, detail, ts) VALUES (?, ?, ?, ?, ?)')
+    .run(streamId, platform, event, detail ?? null, Date.now());
+}
+
+/** Ask one platform what it's receiving. Never throws — a failed probe is reported as such so the
+ *  policy can treat it as unknown rather than as a fault. */
+async function sample(ps: PlatformStream): Promise<{ sample: HealthSample; detail: Partial<PlatformHealth> }> {
+  if (ps.platform === 'facebook') {
+    if (!ps.broadcast_id) {
+      return { sample: { receiving: false, probeFailed: true, warnings: [] }, detail: {} };
+    }
+    const h = await getFacebookIngestHealth(ps.broadcast_id);
+    const warnings: string[] = [];
+    // Facebook's documented ceilings; exceeding them is a real risk of it refusing to produce video.
+    if (h.videoKbps !== null && h.videoKbps > FACEBOOK_MAX_KBPS) warnings.push(`videoBitrateHigh (${h.videoKbps} kbps > ${FACEBOOK_MAX_KBPS})`);
+    if (h.gopMs !== null && h.gopMs > 2000) warnings.push(`keyframeIntervalTooLong (${h.gopMs} ms > 2000)`);
+    return {
+      sample: { receiving: h.receiving, probeFailed: h.error !== null, warnings },
+      detail: { videoKbps: h.videoKbps, audioKbps: h.audioKbps, fps: h.fps, warnings },
+    };
+  }
+
+  if (ps.platform === 'youtube') {
+    const streamId = ps.extra_json ? (JSON.parse(ps.extra_json) as { stream_id?: string }).stream_id : undefined;
+    if (!streamId) {
+      return { sample: { receiving: false, probeFailed: true, warnings: [] }, detail: {} };
+    }
+    const h = await getYouTubeStreamHealth(streamId);
+    const warnings = h.issues.map((i) => i.type || i.reason);
+    return {
+      sample: { receiving: h.receiving, probeFailed: h.error !== null, warnings },
+      detail: { warnings },
+    };
+  }
+
+  // Twitch exposes no ingest health, so "is the channel live" is the best available signal.
+  try {
+    const live = await isTwitchLive();
+    return { sample: { receiving: live, probeFailed: false, warnings: [] }, detail: {} };
+  } catch {
+    return { sample: { receiving: false, probeFailed: true, warnings: [] }, detail: {} };
+  }
+}
+
+async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
+  const db = getDb();
+  const stream = db.prepare('SELECT status FROM streams WHERE id = ?').get(streamId) as { status: string } | undefined;
+  if (stream?.status !== 'live') {
+    stopHealthMonitor(streamId);
+    return;
+  }
+
+  // When the operator's own source is gone, EVERY platform will report nothing — restarting legs
+  // would be pointless and would burn the restart budget on something we can't fix from here. The
+  // fan-out's own source-absent retry and the source watchdog own that case.
+  const sourcePresent = isRtmpPublishing();
+
+  const rows = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status IN ('live','reconnecting')")
+    .all(streamId) as unknown as PlatformStream[];
+
+  const { legStartedAt, restartPlatformLeg, legPushKbps } = await import('../fanout/ffmpeg.js');
+
+  for (const ps of rows) {
+    const platform = ps.platform as Platform;
+    const tracked = monitor.platforms.get(platform) ?? {
+      consecutiveBad: 0,
+      restarts: 0,
+      health: { state: 'unknown', reason: 'Not yet checked', videoKbps: null, audioKbps: null, fps: null, pushKbps: null, warnings: [], alarm: false, checkedAt: 0 },
+    };
+
+    const { sample: s, detail } = await sample(ps);
+    const startedAt = legStartedAt(streamId, platform);
+    // No running leg = treat as freshly started so we don't escalate against a leg the fan-out is
+    // already in the middle of reconnecting.
+    const legAgeMs = startedAt === null ? 0 : Date.now() - startedAt;
+
+    const decision = decideHealthAction({
+      sample: sourcePresent ? s : { ...s, probeFailed: true },
+      counters: { consecutiveBad: tracked.consecutiveBad, restarts: tracked.restarts },
+      legAgeMs,
+    });
+
+    const previous = tracked.health.state;
+    const health: PlatformHealth = {
+      state: decision.state,
+      reason: sourcePresent ? decision.reason : 'Local video source is absent — platform health not meaningful',
+      videoKbps: detail.videoKbps ?? null,
+      audioKbps: detail.audioKbps ?? null,
+      fps: detail.fps ?? null,
+      pushKbps: legPushKbps(streamId, platform),
+      warnings: detail.warnings ?? [],
+      alarm: decision.action === 'alarm' || (tracked.health.alarm && decision.state === 'not_receiving'),
+      checkedAt: Date.now(),
+    };
+
+    monitor.platforms.set(platform, { consecutiveBad: decision.consecutiveBad, restarts: decision.restarts, health });
+
+    // Only log genuine transitions — a 20s poll would otherwise write thousands of rows per stream.
+    if (decision.state !== previous && decision.state !== 'unknown') {
+      const bitrate = health.videoKbps !== null ? ` (${health.videoKbps} kbps)` : '';
+      logEvent(streamId, platform, `health_${decision.state}`, `${decision.reason}${bitrate}`);
+      console.warn(`[health] ${platform}: ${decision.state} — ${decision.reason}${bitrate}`);
+    }
+
+    if (decision.action === 'restart_leg') {
+      console.warn(`[health] ${platform} is not receiving — restarting its fan-out leg`);
+      restartPlatformLeg(streamId, ps);
+    } else if (decision.action === 'alarm') {
+      logEvent(streamId, platform, 'health_alarm', decision.reason);
+      console.error(`[health] ALARM ${platform}: ${decision.reason}`);
+    }
+  }
+}
+
+/** Begin polling platform health for a live stream. Idempotent. */
+export function startHealthMonitor(streamId: string): void {
+  if (monitors.has(streamId)) return;
+
+  const monitor = { platforms: new Map() } as Monitor;
+  monitor.timer = setInterval(() => {
+    void pollOnce(streamId, monitor).catch((err) => {
+      console.warn('[health] Poll failed:', err instanceof Error ? err.message : err);
+    });
+  }, POLL_INTERVAL_MS);
+
+  monitors.set(streamId, monitor);
+  console.log(`[health] Monitoring platform ingest health every ${POLL_INTERVAL_MS / 1000}s`);
+}
+
+export function stopHealthMonitor(streamId: string): void {
+  const monitor = monitors.get(streamId);
+  if (!monitor) return;
+  clearInterval(monitor.timer);
+  monitors.delete(streamId);
+  console.log('[health] Stopped monitoring platform ingest health');
+}
+
+/** Current per-platform health for the UI. Empty when the stream isn't being monitored. */
+export function getStreamHealth(streamId: string): Record<string, PlatformHealth> {
+  const monitor = monitors.get(streamId);
+  if (!monitor) return {};
+  return Object.fromEntries([...monitor.platforms].map(([platform, t]) => [platform, t.health]));
+}
+
+/**
+ * Wait until a platform confirms it is receiving video, or give up. Used to gate the Facebook
+ * LIVE_NOW publish (and its public announcement) on real ingest instead of a blind timer.
+ */
+export async function waitForPlatformReceiving(
+  ps: PlatformStream,
+  opts: { timeoutMs: number; intervalMs?: number },
+): Promise<{ receiving: boolean; detail: Partial<PlatformHealth> }> {
+  const intervalMs = opts.intervalMs ?? 3000;
+  const deadline = Date.now() + opts.timeoutMs;
+  let last: Partial<PlatformHealth> = {};
+
+  for (;;) {
+    const { sample: s, detail } = await sample(ps);
+    last = detail;
+    if (s.receiving) return { receiving: true, detail };
+    if (Date.now() + intervalMs >= deadline) return { receiving: false, detail: last };
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}

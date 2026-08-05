@@ -99,11 +99,16 @@ export async function createYouTubeBroadcast(
         scheduledStartTime: startTime,
       },
       contentDetails: {
-        // We drive the go-live transition ourselves (transitionToLive polls for the
-        // stream to become active, then transitions). Autostart must be OFF — with it on,
-        // YouTube auto-transitions when data arrives and our transition() call then fails
-        // with redundantTransition.
-        enableAutoStart: false,
+        // Autostart ON is a deliberate reliability decision. With it off, going live REQUIRED a
+        // working OAuth token at the exact moment of go-live — a single point of failure that cost
+        // us the 2026-08-05 broadcast, when the refresh token was revoked hours earlier and
+        // liveBroadcasts.transition failed with invalid_grant. With it on, YouTube transitions the
+        // broadcast itself as soon as our RTMP data arrives, so the broadcast goes live even if
+        // every YouTube API call we make fails. transitionToLive still runs (it's idempotent and
+        // tolerates redundantTransition) but is now belt-and-braces rather than load-bearing.
+        enableAutoStart: true,
+        // Autostop stays OFF: it would end the broadcast on a brief source drop, killing the
+        // reconnect window that lets a stream survive the operator's network hiccuping.
         enableAutoStop: false,
         latencyPreference: 'normal',
         monitorStream: { enableMonitorStream: false },
@@ -174,12 +179,26 @@ export async function transitionToLive(broadcastId: string, streamId: string): P
     await new Promise((r) => setTimeout(r, 5000));
   }
 
-  // Transition to live
-  await yt.liveBroadcasts.transition({
-    broadcastStatus: 'live',
-    id: broadcastId,
-    part: ['status'],
-  });
+  // With enableAutoStart on, YouTube may already have taken the broadcast live by itself the moment
+  // our data arrived. Transitioning again would fail with redundantTransition, so check first.
+  if (await isBroadcastLive(yt, broadcastId)) {
+    console.log('[youtube] Broadcast is already live (autostart) — no transition needed');
+    return;
+  }
+
+  // Transition to live. redundantTransition means YouTube beat us to it between the check above and
+  // this call — that's success, not failure.
+  try {
+    await yt.liveBroadcasts.transition({
+      broadcastStatus: 'live',
+      id: broadcastId,
+      part: ['status'],
+    });
+  } catch (err) {
+    if (!isRedundantTransition(err)) throw err;
+    console.log('[youtube] Broadcast was already transitioning to live — treating as success');
+    return;
+  }
 
   // Poll for live confirmation (max 60s)
   for (let i = 0; i < 12; i++) {
@@ -187,6 +206,74 @@ export async function transitionToLive(broadcastId: string, streamId: string): P
     const status = res.data.items?.[0]?.status?.lifeCycleStatus;
     if (status === 'live') return;
     await new Promise((r) => setTimeout(r, 5000));
+  }
+}
+
+/** Is this broadcast already in the live state? Best-effort — a read failure returns false so the
+ *  caller still attempts the transition rather than assuming success. */
+async function isBroadcastLive(yt: ReturnType<typeof getYouTube>, broadcastId: string): Promise<boolean> {
+  try {
+    const res = await yt.liveBroadcasts.list({ id: [broadcastId], part: ['status'] });
+    return res.data.items?.[0]?.status?.lifeCycleStatus === 'live';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does this error mean "the broadcast is already live/transitioning"? YouTube reports that as the
+ * `redundantTransition` reason, which is an expected outcome now that enableAutoStart is on — the
+ * broadcast going live without us is the whole point.
+ */
+function isRedundantTransition(err: unknown): boolean {
+  const e = err as { errors?: { reason?: string }[]; message?: string };
+  if (e?.errors?.some((x) => x.reason === 'redundantTransition')) return true;
+  return /redundantTransition/i.test(e?.message ?? '');
+}
+
+/** YouTube's own view of the ingest stream, from liveStreams.status. */
+export interface YouTubeStreamHealth {
+  /** status.streamStatus: active | created | ready | inactive | error. */
+  streamStatus: string | null;
+  /** status.healthStatus.status: good | ok | bad | noData. */
+  health: string | null;
+  /** Configuration issues at warning/error severity — e.g. videoBitrateLow, noAudioStream. */
+  issues: { type: string; severity: string; reason: string }[];
+  /** True when YouTube says it is receiving data. */
+  receiving: boolean;
+  /** Set when the probe failed (e.g. a dead token); health is then unknown, not bad. */
+  error: string | null;
+}
+
+/**
+ * Ask YouTube what it thinks of our ingest. `healthStatus.configurationIssues` is where YouTube
+ * reports exactly the complaint the Live Control Room shows an operator — including
+ * `videoBitrateLow`, the warning seen on 2026-08-05 — so we can surface it live instead of the
+ * operator discovering it in YouTube Studio.
+ *
+ * Ref: https://developers.google.com/youtube/v3/live/docs/liveStreams (status.streamStatus,
+ * status.healthStatus.status, status.healthStatus.configurationIssues).
+ */
+export async function getYouTubeStreamHealth(streamId: string): Promise<YouTubeStreamHealth> {
+  try {
+    const yt = getYouTube();
+    const res = await yt.liveStreams.list({ id: [streamId], part: ['status'] });
+    const status = res.data.items?.[0]?.status;
+    const streamStatus = status?.streamStatus ?? null;
+    return {
+      streamStatus,
+      health: status?.healthStatus?.status ?? null,
+      issues: (status?.healthStatus?.configurationIssues ?? [])
+        .filter((i) => i.severity === 'warning' || i.severity === 'error')
+        .map((i) => ({ type: i.type ?? '', severity: i.severity ?? '', reason: i.reason ?? '' })),
+      receiving: streamStatus === 'active',
+      error: null,
+    };
+  } catch (err) {
+    return {
+      streamStatus: null, health: null, issues: [], receiving: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 

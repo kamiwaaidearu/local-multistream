@@ -24,6 +24,37 @@ export interface ReminderSettings {
   goLivePost: { enabled: boolean; template: string };
 }
 
+/**
+ * An API error that preserves the server's structured fields. The plain-Error version discarded
+ * them, which made it impossible to tell a real failure from the go-live auth pre-flight (409 +
+ * code 'auth_preflight') that the operator is meant to be able to acknowledge and override.
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string,
+    public readonly platforms?: string[],
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** Per-platform ingest health while live — what the PLATFORM says it is receiving. */
+export interface PlatformIngestHealth {
+  state: 'unknown' | 'healthy' | 'degraded' | 'not_receiving';
+  reason: string;
+  videoKbps: number | null;
+  audioKbps: number | null;
+  fps: number | null;
+  /** What our ffmpeg is pushing, vs videoKbps which is what the platform says it receives. */
+  pushKbps: number | null;
+  warnings: string[];
+  alarm: boolean;
+  checkedAt: number;
+}
+
 function authHeaders(): Record<string, string> {
   const token = getAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -49,7 +80,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `Request failed: ${res.status}`);
+    throw new ApiError(body.error ?? `Request failed: ${res.status}`, res.status, body.code, body.platforms);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -83,11 +114,22 @@ export const api = {
   setupStream: (id: string) => request<unknown>(`/api/streams/${id}/setup`, { method: 'POST' }),
   setupPlatform: (id: string, platform: string) =>
     request<unknown>(`/api/streams/${id}/setup/${platform}`, { method: 'POST' }),
-  goLive: (id: string) => request<unknown>(`/api/streams/${id}/go-live`, { method: 'POST' }),
+  // `force` acknowledges the auth pre-flight (409 / code 'auth_preflight') and goes live on the
+  // platforms whose logins do work.
+  goLive: (id: string, force = false) =>
+    request<unknown>(`/api/streams/${id}/go-live`, { method: 'POST', body: JSON.stringify({ force }) }),
   endStream: (id: string) => request<unknown>(`/api/streams/${id}/end`, { method: 'POST' }),
   // Per-platform auth health (go-live pre-check + live reconnect controls).
   getAuthHealth: () =>
-    request<Record<string, { connected: boolean; ok: boolean }>>('/api/auth/health'),
+    request<Record<string, { connected: boolean; ok: boolean; error?: string | null }>>('/api/auth/health'),
+  // Per-platform INGEST health while live — the platform's own view, not just "is our process alive".
+  getStreamHealth: (id: string) =>
+    request<Record<string, PlatformIngestHealth>>(`/api/streams/${id}/health`),
+  // Record the leg-1 (browser) encode settings + measured uplink server-side. These numbers used to
+  // live only in the browser tab, which made a low-quality broadcast impossible to explain afterwards.
+  reportStudioQuality: (body: {
+    quality: string; videoBps: number; probeMbps: number | null; probeFailed: boolean;
+  }) => request<{ ok: boolean }>('/api/studio/quality', { method: 'POST', body: JSON.stringify(body) }),
   // Retry one platform mid-broadcast after reconnecting its auth (leaves the stream live).
   retryPlatformLive: (id: string, platform: string) =>
     request<unknown>(`/api/streams/${id}/live/${platform}/retry`, { method: 'POST' }),

@@ -11,6 +11,9 @@ client/public/mediapipe/wasm/
 # Environment
 .env
 
+# Server logs (daily files written by server/logging.ts)
+data/logs/
+
 # Database
 data/*.db
 data/*.db-journal

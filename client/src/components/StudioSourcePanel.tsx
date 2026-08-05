@@ -73,6 +73,10 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   // this to whatever preset their link can actually sustain.
   const [quality, setQuality] = useState<QualityKey>(DEFAULT_QUALITY);
   const [probing, setProbing] = useState(false);
+  // True when the last bandwidth probe failed. Surfaced in the UI: a silently-failed probe leaves the
+  // quality at its Low default with nothing on screen to say why, which is exactly the trap that
+  // makes a broadcast quietly go out at 2.5 Mbps.
+  const [probeFailed, setProbeFailed] = useState(false);
   const [probeMbps, setProbeMbps] = useState<number | null>(null);
   const [recommendedQuality, setRecommendedQuality] = useState<QualityKey | null>(null);
 
@@ -305,6 +309,7 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     setProbing(true);
     setProbeMbps(null);
     setRecommendedQuality(null);
+    setProbeFailed(false);
     try {
       const mbps = await measureUploadMbps();
       setProbeMbps(mbps);
@@ -319,6 +324,9 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
         });
       }
     } catch (err) {
+      // Even on the silent auto-run, record the failure — the inline warning below is what tells the
+      // operator their quality is an unverified default rather than a measured recommendation.
+      setProbeFailed(true);
       if (!silent) {
         notifications.show({ title: 'Connection test failed', message: String(err), color: 'red' });
       }
@@ -326,6 +334,23 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
       setProbing(false);
     }
   }, []);
+
+  // Report leg-1 settings to the server whenever they change while connected, so the chosen quality
+  // and the measured uplink land in the server log and event log. Previously these numbers never left
+  // the browser, which is why the 2026-08-05 stream's real encode settings were unrecoverable.
+  const lastReportedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (studioStatus !== 'connected') { lastReportedRef.current = null; return; }
+    const key = `${quality}:${probeMbps ?? 'none'}:${probeFailed}`;
+    if (lastReportedRef.current === key) return;
+    lastReportedRef.current = key;
+    void api.reportStudioQuality({
+      quality,
+      videoBps: QUALITY_PRESETS[quality].videoBps,
+      probeMbps,
+      probeFailed,
+    }).catch(() => { /* telemetry must never disturb a live stream */ });
+  }, [studioStatus, quality, probeMbps, probeFailed]);
 
   // Auto-run the test once on arrival so the quality selector defaults to something the operator's
   // connection can actually carry — no need to remember to click "Test my connection". Gated on
@@ -648,6 +673,15 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
           {probeMbps !== null && probeMbps < MIN_VIABLE_MBPS && (
             <Text size="xs" c="red">
               Your upload looks low — even Low may buffer. A wired connection will help if you have one.
+            </Text>
+          )}
+          {/* An unmeasured connection means the quality above is an untested default, not a
+              recommendation. Say so — a silent failure here is how a broadcast goes out at 2.5 Mbps
+              without anyone realising the probe never ran. */}
+          {probeFailed && (
+            <Text size="xs" c="orange">
+              Couldn’t measure your upload, so quality is set to a safe default
+              ({QUALITY_PRESETS[quality].label}). Run “Test my connection” to pick the best one.
             </Text>
           )}
           {live && (

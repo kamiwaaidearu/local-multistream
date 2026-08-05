@@ -329,6 +329,13 @@ apiRouter.get('/auth/health', async (_req: Request, res: Response) => {
   res.json(await getPlatformAuthHealth());
 });
 
+// Per-platform INGEST health while live — what each platform says it is actually receiving, which
+// is a different question from whether our FFmpeg process is alive. Empty when not monitoring.
+apiRouter.get('/streams/:id/health', async (req: Request, res: Response) => {
+  const { getStreamHealth } = await import('../stream/healthMonitor.js');
+  res.json(getStreamHealth(param(req, 'id')));
+});
+
 // Retry a single platform mid-broadcast (after reconnecting its auth). Leaves the stream live and
 // the other platforms' legs untouched.
 apiRouter.post('/streams/:id/live/:platform/retry', async (req: Request, res: Response) => {
@@ -344,9 +351,17 @@ apiRouter.post('/streams/:id/live/:platform/retry', async (req: Request, res: Re
 apiRouter.post('/streams/:id/go-live', async (req: Request, res: Response) => {
   try {
     const { goLive } = await import('../stream/manager.js');
-    await goLive(param(req, 'id'));
+    // `force` acknowledges the auth pre-flight warning and goes live on the healthy platforms.
+    await goLive(param(req, 'id'), { force: req.body?.force === true });
     res.json({ ok: true });
   } catch (err) {
+    const { AuthPreflightError } = await import('../stream/manager.js');
+    if (err instanceof AuthPreflightError) {
+      // 409, not 400: the request was valid and is retryable as-is with force — the UI turns this
+      // into a confirm prompt rather than a plain failure.
+      res.status(409).json({ error: err.message, code: 'auth_preflight', platforms: err.platforms });
+      return;
+    }
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });

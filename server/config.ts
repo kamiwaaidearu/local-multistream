@@ -56,9 +56,18 @@ export const config = Object.freeze({
   // tunnel hostname, while nothing on the LAN can hit it directly to spoof CF-Connecting-IP (see
   // TRUST_PROXY). RTMP binds separately (node-media-server) and is unaffected.
   bindHost: (process.env.BIND_HOST ?? '').trim(),
-  // Web Studio re-encode quality (kbps). Tunable for your upload bandwidth — note the
-  // server fans this out to EACH platform, so total upload ≈ videoBitrate × (# platforms).
-  studioVideoBitrateKbps: envInt('STUDIO_VIDEO_BITRATE', 4500),
+  // Where the daily server log files live. Empty = the default `data/logs` next to the database
+  // (resolved in index.ts, which knows the install directory). Set LOG_DIR to relocate them.
+  // Logs are the only post-mortem record of a bad broadcast — stdout isn't captured anywhere.
+  logDir: (process.env.LOG_DIR ?? '').trim(),
+  // How many days of log files to keep. 0 or less disables pruning (keep everything).
+  logRetentionDays: envInt('LOG_RETENTION_DAYS', 14),
+  // Web Studio re-encode quality (kbps). This is the ingest encode, and the fan-out copies it
+  // straight through to any platform whose ceiling allows it — so it's effectively the quality
+  // YouTube and Twitch receive. Legs whose platform caps lower (Facebook) are transcoded down;
+  // see fanout/platformEncoding.ts. Tunable for your upload bandwidth, but note the origin's
+  // total egress ≈ this × (# platforms).
+  studioVideoBitrateKbps: envInt('STUDIO_VIDEO_BITRATE', 6000),
   studioAudioBitrateKbps: envInt('STUDIO_AUDIO_BITRATE', 160),
   // Web Studio ingest video encoder:
   //   auto    — use NVIDIA NVENC (h264_nvenc) when this ffmpeg build supports it, else libx264 (CPU)

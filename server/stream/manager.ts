@@ -1,12 +1,13 @@
 import { nanoid } from 'nanoid';
 import { getDb } from '../db/index.js';
-import { getYouTubeAuth, validateYouTubeAuth } from '../auth/youtube.js';
+import { getYouTubeAuth, validateYouTubeAuth, lastYouTubeAuthError } from '../auth/youtube.js';
 import { getFacebookPageToken, getFacebookPageUrl, validateFacebookAuth } from '../auth/facebook.js';
 import { getTwitchCredentials, validateTwitchAuth } from '../auth/twitch.js';
 import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
 import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, resolveFacebookVideoId } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
 import { getReminderSettings, computeReminderTime, renderReminder } from './reminders.js';
+import { startHealthMonitor, stopHealthMonitor, waitForPlatformReceiving } from './healthMonitor.js';
 import type { Stream, PlatformStream, Platform } from '../types.js';
 
 function logEvent(streamId: string | null, platform: string | null, event: string, detail?: string) {
@@ -141,7 +142,27 @@ function getEnabledPlatforms(): Platform[] {
   return platforms;
 }
 
-export interface PlatformAuthHealth { connected: boolean; ok: boolean; }
+export interface PlatformAuthHealth {
+  connected: boolean;
+  ok: boolean;
+  /** Why it's broken, when the platform told us (e.g. "Token has been expired or revoked."). */
+  error?: string | null;
+}
+
+/**
+ * Thrown by goLive when a connected platform's login is dead. Carries the platform list so the API
+ * can return a 409 the UI turns into a confirm-and-override prompt, rather than a dead end: the
+ * operator must ALWAYS be able to get on air without the broken platform.
+ */
+export class AuthPreflightError extends Error {
+  constructor(public readonly platforms: string[]) {
+    super(
+      `These platforms have a broken login and cannot go live: ${platforms.join(', ')}. ` +
+      'Reconnect them in Settings, or go live without them.',
+    );
+    this.name = 'AuthPreflightError';
+  }
+}
 
 /**
  * Per-platform auth health for every connected platform — powers the go-live pre-check and the
@@ -159,7 +180,7 @@ export async function getPlatformAuthHealth(): Promise<Record<Platform, Platform
     twConnected ? validateTwitchAuth() : Promise.resolve(false),
   ]);
   return {
-    youtube: { connected: ytConnected, ok: yt },
+    youtube: { connected: ytConnected, ok: yt, error: yt ? null : lastYouTubeAuthError() },
     facebook: { connected: fbConnected, ok: fb },
     twitch: { connected: twConnected, ok: tw },
   };
@@ -346,7 +367,7 @@ let goLiveInFlight = false;
 /**
  * Go live — start FFmpeg fan-out and transition YouTube.
  */
-export async function goLive(streamId: string): Promise<void> {
+export async function goLive(streamId: string, opts: { force?: boolean } = {}): Promise<void> {
   const db = getDb();
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId) as Stream | undefined;
   if (!stream) throw new Error('Stream not found');
@@ -361,6 +382,18 @@ export async function goLive(streamId: string): Promise<void> {
 
     const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(streamId) as unknown as PlatformStream[];
     if (platformStreams.length === 0) throw new Error('No platforms are set up');
+
+    // Auth pre-flight. A connected platform with a dead grant does not fail loudly — it goes live on
+    // paper and silently does nothing, which is how the 2026-08-05 YouTube leg was lost. Stopping here
+    // gives the operator the chance to reconnect BEFORE the broadcast starts.
+    //
+    // This is a speed bump, never a wall: `force` always gets through, so a broken platform (or a
+    // broken health probe) can never prevent going live on the platforms that do work.
+    if (!opts.force) {
+      const health = await getPlatformAuthHealth();
+      const broken = Object.entries(health).filter(([, v]) => v.connected && !v.ok).map(([p]) => p);
+      if (broken.length > 0) throw new AuthPreflightError(broken);
+    }
 
     // Verify an ingest source is present. Without this we'd mark the stream "live" while nothing
     // flows — the fan-out would retry then give up, and YouTube would time out after 2 minutes.
@@ -432,13 +465,7 @@ export async function goLive(streamId: string): Promise<void> {
     const ytPs = platformStreams.find((ps) => ps.platform === 'youtube');
     if (ytPs?.broadcast_id) {
       const extra = ytPs.extra_json ? JSON.parse(ytPs.extra_json) : {};
-      transitionToLive(ytPs.broadcast_id, extra.stream_id).then(() => {
-        db.prepare("UPDATE platform_streams SET status = 'live' WHERE id = ?").run(ytPs.id);
-        logEvent(streamId, 'youtube', 'transitioned_live');
-      }).catch((err) => {
-        console.error('[manager] YouTube transition failed:', err);
-        logEvent(streamId, 'youtube', 'transition_error', String(err));
-      });
+      void transitionYouTubeWithRetry(streamId, ytPs, extra.stream_id);
     }
 
     // Facebook: an UNPUBLISHED live video must be explicitly transitioned to LIVE_NOW —
@@ -446,32 +473,99 @@ export async function goLive(streamId: string): Promise<void> {
     // process sets the DB status to 'live'; this call is what actually publishes it.)
     const fbPs = platformStreams.find((ps) => ps.platform === 'facebook');
     if (fbPs?.broadcast_id) {
-      const fbId = fbPs.broadcast_id;
-      // FB only accepts the LIVE_NOW transition once it's receiving the encoder's data, so
-      // wait a few seconds for the fan-out to connect, and retry a couple of times in case
-      // the ingest connection is slow to establish.
-      const publishFb = (attempt = 0): void => {
-        publishFacebookLiveVideo(fbId)
-          .then(() => {
-            logEvent(streamId, 'facebook', 'published_live');
-            // Now that the broadcast is live, post the "we're live now" announcement with its link.
-            void postGoLiveAnnouncement(stream, fbId);
-          })
-          .catch((err) => {
-            if (attempt < 2) {
-              setTimeout(() => publishFb(attempt + 1), 5000);
-            } else {
-              console.error('[manager] Facebook publish failed:', err);
-              logEvent(streamId, 'facebook', 'publish_error', String(err));
-            }
-          });
-      };
-      setTimeout(() => publishFb(), 4000);
+      void publishFacebookOnceReceiving(streamId, stream, fbPs);
     }
 
     // Twitch goes live automatically when RTMP connects; the fan-out marks it 'live'.
+
+    // Watch every platform's OWN view of the ingest for the rest of the broadcast. Our FFmpeg
+    // staying alive is not evidence the platform is receiving anything — see healthMonitor.
+    startHealthMonitor(streamId);
   } finally {
     goLiveInFlight = false;
+  }
+}
+
+/**
+ * Drive the YouTube go-live transition, retrying transient failures.
+ *
+ * Since createYouTubeBroadcast sets enableAutoStart, YouTube takes the broadcast live on its own the
+ * moment our RTMP arrives — so this failing no longer means the broadcast failed. That's why an
+ * exhausted retry records a *warning* on the row rather than marking the leg broken: on 2026-08-05
+ * an invalid_grant here left the operator believing YouTube was down when, with autostart, it would
+ * have been live. The health monitor reports whether YouTube is genuinely receiving video.
+ */
+async function transitionYouTubeWithRetry(streamId: string, ytPs: PlatformStream, ytStreamId: string): Promise<void> {
+  const db = getDb();
+  const ATTEMPTS = 3;
+
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    try {
+      await transitionToLive(ytPs.broadcast_id!, ytStreamId);
+      db.prepare("UPDATE platform_streams SET status = 'live', error_message = NULL WHERE id = ?").run(ytPs.id);
+      logEvent(streamId, 'youtube', 'transitioned_live', attempt > 1 ? `Succeeded on attempt ${attempt}` : undefined);
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[manager] YouTube transition failed (attempt ${attempt}/${ATTEMPTS}):`, err);
+      logEvent(streamId, 'youtube', 'transition_error', `Attempt ${attempt}/${ATTEMPTS}: ${msg}`);
+
+      if (attempt === ATTEMPTS) {
+        db.prepare("UPDATE platform_streams SET error_message = ? WHERE id = ?").run(
+          `Could not confirm the go-live transition (${msg}). Autostart should have taken the broadcast live anyway — check the health panel.`,
+          ytPs.id,
+        );
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
+  }
+}
+
+/**
+ * Publish the Facebook live video — but only once Facebook confirms it is actually receiving video,
+ * and only announce it publicly if that confirmation arrived.
+ *
+ * This replaces a blind `setTimeout(publish, 4000)`. That timer assumed FB would reject LIVE_NOW
+ * unless data was flowing; it doesn't. On 2026-08-05 the publish returned 200 for a stream FB never
+ * ingested, we posted the announcement 3 seconds later, and followers got a link to a 0:00 video.
+ *
+ * On timeout we still publish — going live is what the operator asked for, and a broken health probe
+ * must never be the reason we stay dark — but we suppress the announcement and record it loudly, so
+ * the worst case is a quiet broken stream rather than a publicly advertised one.
+ */
+async function publishFacebookOnceReceiving(streamId: string, stream: Stream, fbPs: PlatformStream): Promise<void> {
+  const fbId = fbPs.broadcast_id!;
+
+  // The ingest is live as soon as the fan-out pushes RTMP; LIVE_NOW only controls visibility. So
+  // stream_health is readable while the video is still UNPUBLISHED, which is what makes this order
+  // (confirm ingest → publish → announce) possible.
+  const { receiving, detail } = await waitForPlatformReceiving(fbPs, { timeoutMs: 45_000 });
+  const bitrate = detail.videoKbps != null ? `${detail.videoKbps} kbps` : 'bitrate unknown';
+
+  if (receiving) {
+    logEvent(streamId, 'facebook', 'ingest_confirmed', `Facebook is receiving video (${bitrate})`);
+  } else {
+    console.error('[manager] Facebook never confirmed it was receiving video — publishing without announcing');
+    logEvent(streamId, 'facebook', 'ingest_unconfirmed',
+      'Facebook did not report an incoming stream within 45s — publishing anyway, suppressing the announcement post');
+  }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await publishFacebookLiveVideo(fbId);
+      logEvent(streamId, 'facebook', receiving ? 'published_live' : 'published_live_unconfirmed');
+      // Only tell the world when Facebook told US it has the video.
+      if (receiving) void postGoLiveAnnouncement(stream, fbId);
+      return;
+    } catch (err) {
+      if (attempt === 2) {
+        console.error('[manager] Facebook publish failed:', err);
+        logEvent(streamId, 'facebook', 'publish_error', String(err));
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
   }
 }
 
@@ -483,6 +577,8 @@ export async function endStream(streamId: string): Promise<void> {
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId) as Stream | undefined;
   if (!stream) throw new Error('Stream not found');
   if (stream.status !== 'live') throw new Error('Stream is not live');
+
+  stopHealthMonitor(streamId);
 
   // Stop FFmpeg
   const { stopFanOut } = await import('../fanout/ffmpeg.js');
@@ -503,6 +599,12 @@ export async function endStream(streamId: string): Promise<void> {
     } catch (err) {
       console.error('[manager] YouTube end failed:', err);
       logEvent(streamId, 'youtube', 'end_error', String(err));
+      // Our side of the broadcast IS over regardless of whether YouTube accepted the call, so the
+      // row must not stay 'live'. Leaving it live is how two rows (2026-07-01 and 2026-08-05, both
+      // invalid_grant days) ended up permanently stuck: the parent stream was correctly marked
+      // 'ended', which put them out of reach of reconcileLiveStreams.
+      db.prepare("UPDATE platform_streams SET status = 'ended', error_message = ? WHERE id = ?")
+        .run(`Ended locally, but YouTube's end call failed: ${err instanceof Error ? err.message : String(err)}`, ytPs.id);
     }
   }
 
@@ -520,6 +622,8 @@ export async function endStream(streamId: string): Promise<void> {
     } catch (err) {
       console.error('[manager] Facebook end failed:', err);
       logEvent(streamId, 'facebook', 'end_error', String(err));
+      db.prepare("UPDATE platform_streams SET status = 'ended', error_message = ? WHERE id = ?")
+        .run(`Ended locally, but Facebook's end call failed: ${err instanceof Error ? err.message : String(err)}`, fbPs.id);
     }
   }
 
@@ -561,6 +665,19 @@ export function reconcileLiveStreams(): void {
   }
   if (live.length > 0) {
     console.log(`[manager] Reconciled ${live.length} stream(s) stuck in 'live' after restart`);
+  }
+
+  // Orphaned platform legs: rows still 'live'/'reconnecting' whose parent stream has already ended.
+  // The loop above can't see these — it starts from streams that are still 'live', and the whole
+  // point of this case is that the stream ended correctly while one platform's row did not (an end
+  // API call that threw). Sweep them separately so the UI never shows a finished broadcast as live.
+  const orphaned = db.prepare(`
+    UPDATE platform_streams SET status = 'ended'
+    WHERE status IN ('live', 'reconnecting')
+      AND stream_id IN (SELECT id FROM streams WHERE status != 'live')
+  `).run();
+  if (orphaned.changes > 0) {
+    console.log(`[manager] Reconciled ${orphaned.changes} orphaned platform leg(s) left 'live' under an ended stream`);
   }
 }
 

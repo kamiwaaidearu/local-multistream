@@ -10,6 +10,7 @@ import { authRouter } from './routes/auth.js';
 import { studioRouter } from './routes/studio.js';
 import { authMiddleware, handleLogin, handleAuthCheck } from './studio/auth.js';
 import { getOrCreateCert } from './cert.js';
+import { initFileLogging, closeFileLogging } from './logging.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -94,7 +95,16 @@ function gitCommit(): string {
 
 // Startup
 async function start(): Promise<void> {
+  // Before anything else logs: mirror console output to a daily file. stdout goes nowhere durable,
+  // so without this the only record of a failed broadcast is the operator's terminal scrollback.
+  const logFile = initFileLogging({
+    dir: config.logDir || path.join(__dirname, '..', 'data', 'logs'),
+    retentionDays: config.logRetentionDays,
+  });
+
   console.log(`[server] Booting ${new Date().toISOString()} | node ${process.version} | commit ${gitCommit()} | NODE_ENV=${process.env.NODE_ENV ?? 'development'}`);
+  if (logFile) console.log(`[logging] Writing logs to ${logFile} (keeping ${config.logRetentionDays} days)`);
+  else console.warn('[logging] File logging is disabled — logs exist only in this terminal');
 
   validateConfig();
   getDb(); // Initialize database
@@ -141,6 +151,11 @@ async function start(): Promise<void> {
   // was closed and never reopened), so platform broadcasts aren't left dangling.
   const { startSourceWatchdog } = await import('./stream/sourceWatchdog.js');
   startSourceWatchdog();
+
+  // Watchdog: exercise each platform's credentials on a schedule so a revoked grant surfaces hours
+  // before a broadcast instead of at go-live. Reports only — never blocks or touches a live stream.
+  const { startAuthWatchdog } = await import('./stream/authWatchdog.js');
+  startAuthWatchdog();
 }
 
 // Graceful shutdown
@@ -154,6 +169,10 @@ async function shutdown(): Promise<void> {
   try {
     const { stopSourceWatchdog } = await import('./stream/sourceWatchdog.js');
     stopSourceWatchdog();
+  } catch { /* not initialized */ }
+  try {
+    const { stopAuthWatchdog } = await import('./stream/authWatchdog.js');
+    stopAuthWatchdog();
   } catch { /* not initialized */ }
 
   // End any live stream first so platform broadcasts aren't left dangling. Capped with a
@@ -177,6 +196,8 @@ async function shutdown(): Promise<void> {
     await shutdownStudio();
   } catch { /* not initialized */ }
   closeDb();
+  // Last: flush the log file so the shutdown lines above actually make it to disk.
+  await closeFileLogging();
   process.exit(0);
 }
 

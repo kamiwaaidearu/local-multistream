@@ -20,7 +20,7 @@ import {
   Alert,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { reconnectPlatform } from '../lib/reauth';
 import { useSSE } from '../hooks/useSSE';
 import { useStudioLive, isIntentionalExit } from '../lib/studioLive';
@@ -110,8 +110,10 @@ export function StreamPage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Per-platform auth health (go-live pre-check + live reconnect) and reconnect-in-progress marker.
-  const [authHealth, setAuthHealth] = useState<Record<string, { connected: boolean; ok: boolean }> | null>(null);
+  const [authHealth, setAuthHealth] = useState<Record<string, { connected: boolean; ok: boolean; error?: string | null }> | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
+  // Platforms the server's go-live pre-flight rejected; non-null opens the confirm-and-override modal.
+  const [authPreflight, setAuthPreflight] = useState<string[] | null>(null);
 
   // Refs to call studio connect/disconnect from action button
   const studioConnectRef = useRef<(() => void) | null>(null);
@@ -220,7 +222,10 @@ export function StreamPage() {
   useEffect(() => {
     if (studioStatus === 'connected' && pendingGoLiveRef.current && stream?.id) {
       pendingGoLiveRef.current = false;
-      handleAction('golive', () => api.goLive(stream.id));
+      // Goes through the pre-flight like any other go-live: if a connected platform's login is dead
+      // this now opens the confirm modal instead of silently going live without that platform, which
+      // is what happened on 2026-08-05 (auto-fired go-live, YouTube quietly never transitioned).
+      void handleGoLive();
     }
     if (studioStatus === 'error') {
       pendingGoLiveRef.current = false;
@@ -247,6 +252,32 @@ export function StreamPage() {
       await refreshStream();
     } catch (err) {
       notifications.show({ title: 'Error', message: String(err), color: 'red' });
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
+  /**
+   * Go live, honoring the server's auth pre-flight.
+   *
+   * A 409 with code 'auth_preflight' means one or more connected platforms have a dead login and
+   * would silently fail to go live (the 2026-08-05 YouTube case). We surface that as a confirmation
+   * instead of a failure, then retry with force — the operator must always be able to get on air on
+   * whichever platforms do work.
+   */
+  async function handleGoLive(force = false) {
+    if (!stream) return;
+    setActionLoading('golive');
+    try {
+      await api.goLive(stream.id, force);
+      await refreshStream();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'auth_preflight') {
+        setAuthPreflight(err.platforms ?? []);
+        checkAuthHealth(); // refresh the banner so the reconnect buttons are accurate
+      } else {
+        notifications.show({ title: 'Error', message: String(err), color: 'red' });
+      }
     } finally {
       setActionLoading(null);
     }
@@ -502,7 +533,7 @@ export function StreamPage() {
         <Button
           color="red"
           size="lg"
-          onClick={() => handleAction('golive', () => api.goLive(stream.id))}
+          onClick={() => void handleGoLive()}
           loading={actionLoading === 'golive'}
           disabled={!effectiveSourceConnected}
         >
@@ -517,7 +548,7 @@ export function StreamPage() {
           onClick={() => {
             if (studioStatus === 'connected') {
               // Already connected, go live directly
-              handleAction('golive', () => api.goLive(stream.id));
+              void handleGoLive();
             } else {
               // Connect first, then go live will auto-trigger via effect
               pendingGoLiveRef.current = true;
@@ -614,6 +645,53 @@ export function StreamPage() {
           saveLabel="Save Changes"
         />
       </Drawer>
+
+      {/* Auth pre-flight: a connected platform's login is dead, so it would go live in name only.
+          Offer reconnect, but never block — "Go Live Anyway" must always be available. */}
+      <Modal
+        opened={authPreflight !== null}
+        onClose={() => setAuthPreflight(null)}
+        title="A platform login is broken"
+      >
+        <Stack>
+          <Text>
+            {(authPreflight ?? []).join(', ')} {(authPreflight?.length ?? 0) === 1 ? 'has' : 'have'} an
+            expired or revoked login. Going live now would start the broadcast without{' '}
+            {(authPreflight?.length ?? 0) === 1 ? 'it' : 'them'}.
+          </Text>
+          {(authPreflight ?? []).map((platform) => (
+            <Group key={platform} justify="space-between">
+              <Text size="sm" c="dimmed">
+                {platform}: {authHealth?.[platform]?.error ?? 'login expired'}
+              </Text>
+              <Button
+                size="xs"
+                variant="light"
+                loading={reconnecting === platform}
+                onClick={() => void handleReconnect(platform)}
+              >
+                Reconnect
+              </Button>
+            </Group>
+          ))}
+          <Text size="sm" c="dimmed">
+            Reconnecting opens a popup and won't disturb this tab or the Web Studio source.
+          </Text>
+          <Group justify="flex-end">
+            <Button variant="subtle" onClick={() => setAuthPreflight(null)}>Cancel</Button>
+            <Button
+              color="red"
+              loading={actionLoading === 'golive'}
+              onClick={() => {
+                setAuthPreflight(null);
+                void handleGoLive(true);
+              }}
+            >
+              Go Live Anyway
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
 
       {/* End Stream Confirmation */}
       <Modal opened={confirmEnd} onClose={() => setConfirmEnd(false)} title="End Stream">

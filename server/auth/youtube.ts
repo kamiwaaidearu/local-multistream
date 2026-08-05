@@ -88,19 +88,84 @@ export function getYouTubeAuth(): ReturnType<typeof createOAuth2Client> | null {
 }
 
 /**
- * Verify YouTube auth is usable by forcing a token refresh. Returns false if no account is
- * connected or the refresh token is dead (invalid_grant) — the exact failure that silently sinks
- * a go-live transition.
+ * Exchange the stored refresh token for a fresh access token, and persist it.
+ *
+ * This exists because `oauth2Client.getAccessToken()` is NOT a test of the refresh token: it returns
+ * the cached access token untouched whenever that token hasn't expired yet. That is precisely how the
+ * 2026-08-05 broadcast failed — setup at 12:54Z succeeded on a cached access token valid until
+ * 13:05Z, while the underlying refresh token had already been revoked. The failure only surfaced at
+ * 16:31Z go-live, when a refresh was finally attempted for the first time.
+ *
+ * Hitting the token endpoint directly is unambiguous about what's being tested, and persisting the
+ * result means routine checks also keep the access token warm — so go-live isn't the first thing in
+ * hours to depend on the grant still being valid.
  */
-export async function validateYouTubeAuth(): Promise<boolean> {
-  const auth = getYouTubeAuth();
-  if (!auth) return false;
+export async function refreshYouTubeAccessToken(): Promise<{ ok: boolean; error?: string }> {
+  const db = getDb();
+  const cred = db.prepare('SELECT refresh_token FROM credentials WHERE platform = ?').get('youtube') as
+    { refresh_token: string | null } | undefined;
+
+  if (!cred?.refresh_token) return { ok: false, error: 'No YouTube account is connected' };
+
   try {
-    const { token } = await auth.getAccessToken();
-    return !!token;
-  } catch {
-    return false;
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: config.youtube.clientId,
+        client_secret: config.youtube.clientSecret,
+        refresh_token: cred.refresh_token,
+        grant_type: 'refresh_token',
+      }),
+    });
+
+    const data = (await res.json()) as {
+      access_token?: string; expires_in?: number; error?: string; error_description?: string;
+    };
+
+    if (!res.ok || !data.access_token) {
+      // invalid_grant here means the grant is dead and NO amount of retrying will fix it — the
+      // operator must reconnect YouTube. Surface Google's own wording; it distinguishes "expired or
+      // revoked" from other failures.
+      return { ok: false, error: data.error_description ?? data.error ?? res.statusText };
+    }
+
+    db.prepare('UPDATE credentials SET access_token = ?, token_expiry = ? WHERE platform = ?').run(
+      data.access_token,
+      Date.now() + (data.expires_in ?? 3600) * 1000,
+      'youtube',
+    );
+    return { ok: true };
+  } catch (err) {
+    // A network blip is NOT a dead grant — say so, so callers don't tell the operator to reconnect.
+    return { ok: false, error: `Could not reach Google: ${err instanceof Error ? err.message : String(err)}` };
   }
+}
+
+// Cache the last real probe briefly. getPlatformAuthHealth backs both the UI's pre-go-live check and
+// the watchdog; without this, a future caller adding a poll would hammer Google's token endpoint.
+let lastProbe: { at: number; ok: boolean; error?: string } | null = null;
+const PROBE_CACHE_MS = 60_000;
+
+/** The most recent probe result, for surfacing WHY auth is broken without re-probing. */
+export function lastYouTubeAuthError(): string | null {
+  return lastProbe && !lastProbe.ok ? lastProbe.error ?? 'Unknown error' : null;
+}
+
+/**
+ * Verify YouTube auth is genuinely usable, by exercising the refresh token rather than trusting a
+ * cached access token. Returns false when no account is connected or the grant is dead.
+ */
+export async function validateYouTubeAuth(opts: { force?: boolean } = {}): Promise<boolean> {
+  if (!getYouTubeAuth()) return false;
+
+  if (!opts.force && lastProbe && Date.now() - lastProbe.at < PROBE_CACHE_MS) {
+    return lastProbe.ok;
+  }
+
+  const { ok, error } = await refreshYouTubeAccessToken();
+  lastProbe = { at: Date.now(), ok, error };
+  return ok;
 }
 
 export function disconnectYouTube(): void {

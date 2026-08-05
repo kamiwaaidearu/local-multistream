@@ -3,6 +3,9 @@ import { getDb } from '../db/index.js';
 import { config } from '../config.js';
 import { isRtmpPublishing } from '../rtmp/server.js';
 import { decideFanoutRetry, MAX_PLATFORM_RETRIES } from './retryPolicy.js';
+import { decideLegEncoding, buildLegArgs, describeLegEncoding } from './platformEncoding.js';
+import { activeEncoder } from '../studio/ingest.js';
+import { ProgressTracker } from '../ffmpegProgress.js';
 import type { PlatformStream } from '../types.js';
 
 // Get ffmpeg binary path
@@ -22,7 +25,12 @@ interface ActiveProcess {
   retryCount: number;
   startedAt: number;
   stopping: boolean; // set when we intentionally stop it, so 'close' doesn't trigger a retry
+  /** Parsed bitrate/fps/speed for this leg, throttled for logging and readable for the UI. */
+  progress: ProgressTracker;
 }
+
+/** How often to log a parsed per-leg push-rate summary. */
+const LEG_PROGRESS_LOG_MS = 60_000;
 
 const activeProcesses = new Map<string, ActiveProcess>();
 
@@ -65,20 +73,23 @@ function buildFfmpegArgs(platformStream: PlatformStream): string[] {
     output = `${platformStream.rtmp_url}/${platformStream.stream_key}`;
   }
 
-  return [
-    '-rw_timeout', '10000000',   // 10s I/O timeout (microseconds) — prevents instant crash on brief RTMP hiccups
-    '-i', input,
-    '-c', 'copy',
-    '-flvflags', 'no_duration_filesize',
-    '-f', 'flv',
-    output,
-  ];
+  // Legs are no longer all stream-copies of one bitrate. The ingest encodes once at
+  // STUDIO_VIDEO_BITRATE and each leg is copied through if its platform allows that rate, or
+  // re-encoded down to the platform's ceiling if not (Facebook's 4000 kbps). See platformEncoding.
+  const ingestKbps = config.studioVideoBitrateKbps;
+  const encoding = decideLegEncoding(platformStream.platform, ingestKbps);
+  const { encoder, preset } = encoding.mode === 'transcode'
+    ? activeEncoder()
+    : { encoder: 'libx264' as const, preset: '' }; // unused for a copy
+
+  return buildLegArgs({ input, output, encoding, encoder, preset });
 }
 
 function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): void {
   const args = buildFfmpegArgs(ps);
   const key = `${streamId}:${ps.platform}`;
 
+  console.log(`[ffmpeg] ${describeLegEncoding(ps.platform, decideLegEncoding(ps.platform, config.studioVideoBitrateKbps), config.studioVideoBitrateKbps)}`);
   console.log(`[ffmpeg] Starting ${ps.platform}: ${ffmpegPath} ${args.join(' ').replace(/\/[^/]+$/, '/***')}`);
 
   const child = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -92,6 +103,7 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
     retryCount,
     startedAt: Date.now(),
     stopping: false,
+    progress: new ProgressTracker(LEG_PROGRESS_LOG_MS),
   };
 
   activeProcesses.set(key, proc);
@@ -100,6 +112,9 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
   child.stderr?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
     if (line.includes('frame=') || line.includes('speed=')) {
+      // Periodic parsed summary so each leg's real push rate is in the log, not just streamed past.
+      const summary = proc.progress.update(line);
+      if (summary) console.log(`[ffmpeg] ${ps.platform} pushing at ${summary}`);
       pushSSEEvent({ type: 'ffmpeg_status', platform: ps.platform, data: line });
     }
   });
@@ -196,6 +211,43 @@ export function ensurePlatformLeg(streamId: string, ps: PlatformStream): void {
 /** True if this platform's fan-out leg is currently running. */
 export function isLegActive(streamId: string, platform: string): boolean {
   return activeProcesses.has(`${streamId}:${platform}`);
+}
+
+/** When this platform's leg process started, or null if it isn't running. The health monitor uses
+ *  this as the warm-up clock — a leg that just (re)started hasn't had time to be measured yet. */
+export function legStartedAt(streamId: string, platform: string): number | null {
+  return activeProcesses.get(`${streamId}:${platform}`)?.startedAt ?? null;
+}
+
+/** What WE are currently pushing on this leg, per FFmpeg. Distinct from the platform's own reading:
+ *  comparing the two is what distinguishes "we're not sending" from "they're not receiving". */
+export function legPushKbps(streamId: string, platform: string): number | null {
+  return activeProcesses.get(`${streamId}:${platform}`)?.progress.latest?.bitrateKbps ?? null;
+}
+
+/**
+ * Force-restart one platform's fan-out leg against the same ingest URL. Used by the health monitor
+ * when the PLATFORM reports it isn't receiving video even though our process looks fine — the
+ * failure mode that made Facebook produce an empty video on 2026-08-05.
+ *
+ * Distinct from ensurePlatformLeg, which is a no-op when the leg is already running: here the
+ * running process is precisely the problem. Marked `stopping` first so the normal close handler
+ * treats the kill as intentional and doesn't race its own retry against our respawn.
+ */
+export function restartPlatformLeg(streamId: string, ps: PlatformStream): void {
+  const key = `${streamId}:${ps.platform}`;
+  const existing = activeProcesses.get(key);
+
+  if (existing) {
+    existing.stopping = true;
+    activeProcesses.delete(key);
+    try { existing.child.stdin?.write('q\n'); } catch { /* ignore */ }
+    // Don't wait on a graceful quit — this leg is already misbehaving.
+    setTimeout(() => { try { existing.child.kill(); } catch { /* already gone */ } }, 2000);
+  }
+
+  logEvent(streamId, ps.platform, 'leg_restarted', 'Platform reported it was not receiving video');
+  if (ps.rtmp_url || ps.stream_key) spawnFfmpeg(streamId, ps, 0);
 }
 
 /**

@@ -96,3 +96,31 @@ studioRouter.post('/overlay', overlayUpload.single('image'), (req: Request, res:
   const url = `/uploads/overlays/${req.file.filename}`;
   res.json({ url, filename: req.file.filename });
 });
+
+// --- Leg-1 quality telemetry ---
+
+/**
+ * Record the browser-side (leg-1) encode settings the operator is actually using, plus the measured
+ * upload bandwidth behind them.
+ *
+ * This exists because leg-1 quality lived ONLY in browser state. When the 2026-08-05 stream came out
+ * low-bitrate, there was no way to answer "what was the browser encoding at, and what did the probe
+ * measure?" — the numbers had never left the tab. Now they're in the log and the event log, so a
+ * quality post-mortem is possible after the fact.
+ */
+studioRouter.post('/quality', (req: Request, res: Response) => {
+  const { quality, videoBps, probeMbps, probeFailed } = (req.body ?? {}) as {
+    quality?: string; videoBps?: number; probeMbps?: number | null; probeFailed?: boolean;
+  };
+
+  const measured = typeof probeMbps === 'number'
+    ? `${probeMbps.toFixed(1)} Mbps measured`
+    : probeFailed ? 'bandwidth probe FAILED — quality left at its default' : 'bandwidth not measured';
+  const detail = `Leg-1 encode: ${quality ?? 'unknown'} (${videoBps ? Math.round(videoBps / 1000) : '?'} kbps) · ${measured}`;
+
+  console.log(`[studio] ${detail}`);
+  getDb().prepare('INSERT INTO event_log (stream_id, platform, event, detail, ts) VALUES (?, ?, ?, ?, ?)')
+    .run(null, null, 'studio_quality', detail, Date.now());
+
+  res.json({ ok: true });
+});

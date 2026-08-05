@@ -7,6 +7,11 @@ import { isRtmpPublishing } from '../rtmp/server.js';
 import { handleBandwidthProbe } from './bandwidthProbe.js';
 import { resolveEncoder, buildVideoArgs, buildAudioArgs, shouldRuntimeFallback, type VideoEncoder } from './encoderConfig.js';
 import { decideStudioConnection } from './sessionTakeover.js';
+import { ProgressTracker } from '../ffmpegProgress.js';
+
+/** How often to log a parsed ingest bitrate summary. Often enough to see a sag develop, rare enough
+ *  not to add log pressure to the event loop that's also feeding webm into FFmpeg. */
+const INGEST_PROGRESS_LOG_MS = 30_000;
 
 let ffmpegPath: string;
 try {
@@ -114,6 +119,16 @@ function getEncoder(): ResolvedEncoder {
   return resolved;
 }
 
+/**
+ * The resolved video encoder + preset for this host. Exported so the fan-out can transcode a leg
+ * (e.g. Facebook, whose 4000 kbps cap sits below the ingest rate) using the same encoder choice and
+ * the same cached NVENC probe result, rather than duplicating the detection and possibly disagreeing
+ * with the ingest about whether NVENC works here.
+ */
+export function activeEncoder(): { encoder: VideoEncoder; preset: string } {
+  return getEncoder();
+}
+
 function startIngestFfmpeg(): ChildProcess {
   const rtmpUrl = `rtmp://127.0.0.1:${config.rtmpPort}/live/${config.localStreamKey}`;
 
@@ -140,11 +155,17 @@ function startIngestFfmpeg(): ChildProcess {
   // flooding synchronous console.log on the event loop that also feeds webm into this ingest.
   let lastTsWarnAt = 0;
   let tsWarnSuppressed = 0;
+  // Parsed, throttled bitrate/fps/speed summary. The raw progress lines are still logged below, but
+  // this gives a greppable "what were we actually encoding at" record — the number that was missing
+  // when the 2026-08-05 stream's quality came into question.
+  const progress = new ProgressTracker(INGEST_PROGRESS_LOG_MS);
   child.stderr?.on('data', (data: Buffer) => {
     const line = data.toString().trim();
     if (!line) return;
     // Errors and periodic progress lines: log as before (ffmpeg already rate-limits these).
     if (line.includes('frame=') || line.includes('Error') || line.includes('error')) {
+      const summary = progress.update(line);
+      if (summary) console.log(`[studio] Ingest encoding at ${summary} (target ${config.studioVideoBitrateKbps} kbps)`);
       console.log(`[studio:ffmpeg] ${line}`);
       return;
     }
