@@ -115,9 +115,17 @@ export async function createYouTubeBroadcast(
         latencyPreference: 'normal',
         monitorStream: { enableMonitorStream: false },
       },
-      // 'private' (not 'unlisted') for a test: unlisted is viewable by anyone holding the link, which
-      // is not a guarantee worth relying on for a rehearsal. Private is visible only to the account.
-      status: { privacyStatus: isTest ? 'private' : 'public' },
+      status: {
+        // 'private' (not 'unlisted') for a test: unlisted is viewable by anyone holding the link, which
+        // is not a guarantee worth relying on for a rehearsal. Private is visible only to the account.
+        privacyStatus: isTest ? 'private' : 'public',
+        // Declare the audience up front. Without this, YouTube leaves every API-created broadcast
+        // pending and nags in Studio before it will publish — a manual step per broadcast, on the day.
+        // It also isn't merely paperwork: "made for kids" DISABLES comments, so leaving it unset (or
+        // answering it wrongly under time pressure) would silence the congregation on a prayer stream.
+        // false = not made for kids, which is the operator's standing answer for this channel.
+        selfDeclaredMadeForKids: false,
+      },
     },
   });
 
