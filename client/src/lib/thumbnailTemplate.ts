@@ -385,6 +385,24 @@ export async function renderThumbnailFile(
   return new File([blob], filename, { type: 'image/jpeg' });
 }
 
+/**
+ * Parses a numeric design field, returning null for anything that is not a real number.
+ *
+ * Mantine's NumberInput emits `''` while a field is empty, and `Number('')` is 0 — so coercing
+ * directly meant clearing "Font size" to retype it wrote 0, blanked the line out of the preview, and
+ * persisted that on the next Save. Returning null lets the caller hold the last good value until a
+ * usable number is typed.
+ */
+export function parseNumericField(
+  value: string | number | null | undefined,
+  min: number,
+  max: number,
+): number | null {
+  const n = typeof value === 'number' ? value : parseFloat(String(value ?? ''));
+  if (!Number.isFinite(n)) return null;
+  return Math.min(max, Math.max(min, n));
+}
+
 /** Makes a filename-safe slug from a stream title, for downloaded or attached thumbnails. */
 export function thumbnailFilename(title: string): string {
   const slug = title
@@ -395,14 +413,33 @@ export function thumbnailFilename(title: string): string {
   return `${slug || 'thumbnail'}.jpg`;
 }
 
-/** Ensures the bundled webfont is decoded before anything is drawn. Canvas silently falls back to a
- *  system sans if the face is not yet loaded, which would ship an off-brand image with no error. */
-export async function ensureThumbnailFont(): Promise<void> {
-  if (typeof document === 'undefined' || !document.fonts) return;
-  await Promise.all([
-    document.fonts.load('700 100px "Source Sans 3"'),
-    document.fonts.load('600 100px "Source Sans 3"'),
-    document.fonts.load('italic 600 100px "Source Sans 3"'),
+/**
+ * A probe string that forces BOTH declared subsets to download.
+ *
+ * `document.fonts.load(font)` with no text uses an ASCII default, which only matches the `latin`
+ * @font-face's unicode-range — the `latin-ext` face is never requested, stays un-pending, and so
+ * `document.fonts.ready` resolves without it. A title using a latin-ext glyph (a macron in a Latin
+ * title, a name with ō/ś/ż) would then draw in a system sans with nothing to trigger a redraw.
+ * 'A' covers latin; 'Ā' (U+0100) is the first codepoint of the latin-ext range.
+ */
+const FONT_PROBE = 'AĀ';
+
+/**
+ * Decodes the bundled webfont before anything is drawn. Canvas silently falls back to a system sans
+ * if a face is not yet loaded, which would ship an off-brand image with no error anywhere.
+ *
+ * Resolves to false when one or more faces failed rather than throwing: a missing font file should
+ * downgrade the typeface and warn, not take the whole generator down with it.
+ */
+export async function ensureThumbnailFont(): Promise<boolean> {
+  if (typeof document === 'undefined' || !document.fonts) return false;
+  const results = await Promise.allSettled([
+    document.fonts.load('700 100px "Source Sans 3"', FONT_PROBE),
+    document.fonts.load('600 100px "Source Sans 3"', FONT_PROBE),
+    document.fonts.load('italic 600 100px "Source Sans 3"', FONT_PROBE),
   ]);
   await document.fonts.ready;
+  // A face that resolves to an empty array matched no @font-face rule at all — i.e. the stylesheet
+  // never loaded — which is just as broken as a network error, and equally silent.
+  return results.every((r) => r.status === 'fulfilled' && r.value.length > 0);
 }

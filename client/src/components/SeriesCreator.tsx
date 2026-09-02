@@ -64,7 +64,13 @@ export function SeriesCreator({ opened, onClose, onCreated }: SeriesCreatorProps
   const [defaultTemplateId, setDefaultTemplateId] = useState<string | null>(null);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
-  const { templates, ready: thumbnailsReady } = useThumbnailTemplates(opened);
+  const {
+    templates,
+    ready: thumbnailsReady,
+    error: thumbnailsError,
+    fontWarning,
+    reload: reloadThumbnails,
+  } = useThumbnailTemplates(opened);
 
   useEffect(() => {
     if (!defaultTemplateId && templates.length > 0) setDefaultTemplateId(templates[0].id);
@@ -100,6 +106,10 @@ export function SeriesCreator({ opened, onClose, onCreated }: SeriesCreatorProps
    *
    * Plates are decoded once per template rather than per entry — a four-week series on one template
    * would otherwise decode the same 2MB photograph four times.
+   *
+   * Throws rather than falling back on any problem it cannot render through. Silently substituting a
+   * flat-blue background, or silently skipping an entry whose template has gone missing, produces
+   * broken thumbnails that are only discovered once they are public on YouTube and Facebook.
    */
   async function renderEntryThumbnails(): Promise<Map<number, File>> {
     const out = new Map<number, File>();
@@ -110,18 +120,31 @@ export function SeriesCreator({ opened, onClose, onCreated }: SeriesCreatorProps
         out.set(i, entry.thumbnail);
         continue;
       }
+      // A null templateId is a deliberate "no thumbnail for this week"; an id that does not resolve
+      // means the template list is stale or failed to load, which is not the same thing.
+      if (entry.templateId === null) continue;
       const stored = templates.find((t) => t.id === entry.templateId);
-      if (!stored) continue;
+      if (!stored) {
+        throw new Error(
+          `Week ${i + 1} points at a thumbnail template that no longer exists. Reopen the series and pick a template.`,
+        );
+      }
 
       const plateKey = stored.config.plate ?? '';
       if (!plateCache.has(plateKey)) plateCache.set(plateKey, await loadPlate(stored.config.plate));
+      const plateImage = plateCache.get(plateKey) ?? null;
+      if (stored.config.plate && !plateImage) {
+        throw new Error(
+          `The background plate for "${stored.name}" (${stored.config.plate}) could not be loaded, so its thumbnails would come out as flat colour. Nothing was created.`,
+        );
+      }
 
       out.set(
         i,
         await renderThumbnailFile(
           stored.config,
           { title: entry.name, date: entry.scheduled_start },
-          plateCache.get(plateKey) ?? null,
+          plateImage,
           thumbnailFilename(entry.name),
         ),
       );
@@ -171,9 +194,36 @@ export function SeriesCreator({ opened, onClose, onCreated }: SeriesCreatorProps
   const editing = editingIndex !== null ? entries[editingIndex] : null;
   const missingPlate = templates.some((t) => entries.some((e) => e.templateId === t.id) && !t.config.plate);
 
+  // A failure to load the templates must never pass quietly: without them every week silently falls
+  // back to "no thumbnail", and the series would be created looking fine but with nothing attached.
+  const thumbnailsBlocked = !!thumbnailsError || !thumbnailsReady;
+  const thumbnailAlerts = (
+    <>
+      {thumbnailsError && (
+        <Alert color="red" title="Thumbnail templates could not be loaded">
+          <Stack gap="xs" align="flex-start">
+            <Text size="sm">
+              {thumbnailsError} — without them this series would be created with no thumbnails at
+              all, so creating is blocked until they load.
+            </Text>
+            <Button size="xs" variant="light" onClick={() => void reloadThumbnails()}>
+              Retry
+            </Button>
+          </Stack>
+        </Alert>
+      )}
+      {fontWarning && (
+        <Alert color="yellow" title="Brand font unavailable">
+          {fontWarning}
+        </Alert>
+      )}
+    </>
+  );
+
   return (
     <Modal opened={opened} onClose={onClose} title="New Series" size="xl">
       <Stack>
+        {thumbnailAlerts}
         {entries.length === 0 ? (
           <>
             <DateTimePicker
@@ -199,7 +249,7 @@ export function SeriesCreator({ opened, onClose, onCreated }: SeriesCreatorProps
               placeholder="No thumbnails"
               clearable
             />
-            <Button onClick={generateSlots} disabled={!startDate || !count}>
+            <Button onClick={generateSlots} disabled={!startDate || !count || thumbnailsBlocked}>
               Generate {count || 0} Weekly Slots
             </Button>
           </>
@@ -297,7 +347,7 @@ export function SeriesCreator({ opened, onClose, onCreated }: SeriesCreatorProps
               <Button variant="subtle" onClick={() => setEntries([])}>
                 Back
               </Button>
-              <Button onClick={handleCreateAll} loading={saving}>
+              <Button onClick={handleCreateAll} loading={saving} disabled={thumbnailsBlocked}>
                 Create All ({entries.length} Streams)
               </Button>
             </Group>

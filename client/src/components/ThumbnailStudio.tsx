@@ -28,6 +28,7 @@ import { useThumbnailTemplates } from '../hooks/useThumbnailTemplates';
 import { ThumbnailPreview } from './ThumbnailPreview';
 import {
   loadPlate,
+  parseNumericField,
   renderThumbnailFile,
   thumbnailFilename,
   type LaidOutElement,
@@ -66,7 +67,7 @@ export function ThumbnailStudio({
   onUse,
   useLabel = 'Use this thumbnail',
 }: ThumbnailStudioProps) {
-  const { templates, plates, ready, error, reload } = useThumbnailTemplates(opened);
+  const { templates, plates, ready, error, fontWarning, reload } = useThumbnailTemplates(opened);
 
   const [selectedId, setSelectedId] = useState<string | null>(templateId);
   const [working, setWorking] = useState<ThumbnailTemplate | null>(null);
@@ -103,6 +104,20 @@ export function ThumbnailStudio({
   function patchTemplate(patch: Partial<ThumbnailTemplate>) {
     setWorking((prev) => (prev ? { ...prev, ...patch } : prev));
     setDirty(true);
+  }
+
+  /** Writes a numeric Design field, holding the last good value while the input is mid-edit or
+   *  empty. See parseNumericField for why a direct Number() coercion corrupted templates. */
+  function patchNumber(
+    id: string,
+    key: 'x' | 'y' | 'maxWidth' | 'maxLines' | 'fontSize' | 'fontWeight' | 'lineHeight' | 'letterSpacing',
+    value: string | number,
+    min: number,
+    max: number,
+  ) {
+    const n = parseNumericField(value, min, max);
+    if (n === null) return;
+    patchElement(id, { [key]: n });
   }
 
   function patchElement(id: string, patch: Partial<ThumbnailTextElement>) {
@@ -195,6 +210,36 @@ export function ThumbnailStudio({
     }
   }
 
+  /**
+   * Restores the stock templates to their seeded Figma geometry, keeping whatever plate is selected.
+   *
+   * Without this there was no way back from a botched Design edit once it had been saved — the
+   * server route existed but nothing in the UI called it.
+   */
+  async function handleReset() {
+    if (!window.confirm(
+      'Reset the stock templates (Weekly, Latin special edition) to their original layout?\n\n' +
+      'Your uploaded background plate is kept, and templates you created yourself are untouched.',
+    )) return;
+    setBusy(true);
+    try {
+      const restored = await api.resetThumbnailTemplates();
+      await reload();
+      // The load effect is keyed on the selected id, which has not changed, so the working copy has
+      // to be refreshed explicitly or the editor would keep showing the pre-reset design.
+      const mine = restored.find((t) => t.id === working?.id);
+      if (mine) {
+        setWorking(structuredClone(mine.config));
+        setDirty(false);
+      }
+      notifications.show({ title: 'Reset', message: 'Stock templates restored', color: 'green' });
+    } catch (err) {
+      notifications.show({ title: 'Error', message: String(err), color: 'red' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleUploadPlate(file: File | null) {
     if (!file) return;
     setBusy(true);
@@ -241,6 +286,11 @@ export function ThumbnailStudio({
             <Alert color="yellow" title="No background plate">
               This template has no background image yet. Open Design below and upload the exported
               plate — the flat blue behind the text is only a fallback.
+            </Alert>
+          )}
+          {fontWarning && (
+            <Alert color="yellow" title="Brand font unavailable">
+              {fontWarning}
             </Alert>
           )}
           {shrunk.length > 0 && (
@@ -329,39 +379,39 @@ export function ThumbnailStudio({
                         <Group grow>
                           <NumberInput
                             size="xs" label="X" min={0} max={1} step={0.005} decimalScale={3}
-                            value={el.x} onChange={(v) => patchElement(el.id, { x: Number(v) })}
+                            value={el.x} onChange={(v) => patchNumber(el.id, 'x', v, 0, 1)}
                           />
                           <NumberInput
                             size="xs" label="Y" min={0} max={1} step={0.005} decimalScale={3}
-                            value={el.y} onChange={(v) => patchElement(el.id, { y: Number(v) })}
+                            value={el.y} onChange={(v) => patchNumber(el.id, 'y', v, 0, 1)}
                           />
                           <NumberInput
                             size="xs" label="Max width" min={0.05} max={1} step={0.01} decimalScale={3}
-                            value={el.maxWidth} onChange={(v) => patchElement(el.id, { maxWidth: Number(v) })}
+                            value={el.maxWidth} onChange={(v) => patchNumber(el.id, 'maxWidth', v, 0.05, 1)}
                           />
                         </Group>
                         <Group grow>
                           <NumberInput
                             size="xs" label="Font size" min={0.01} max={0.4} step={0.002} decimalScale={4}
-                            value={el.fontSize} onChange={(v) => patchElement(el.id, { fontSize: Number(v) })}
+                            value={el.fontSize} onChange={(v) => patchNumber(el.id, 'fontSize', v, 0.01, 0.4)}
                           />
                           <NumberInput
                             size="xs" label="Weight" min={200} max={900} step={100}
-                            value={el.fontWeight} onChange={(v) => patchElement(el.id, { fontWeight: Number(v) })}
+                            value={el.fontWeight} onChange={(v) => patchNumber(el.id, 'fontWeight', v, 200, 900)}
                           />
                           <NumberInput
                             size="xs" label="Line height" min={0.6} max={2} step={0.01} decimalScale={2}
-                            value={el.lineHeight} onChange={(v) => patchElement(el.id, { lineHeight: Number(v) })}
+                            value={el.lineHeight} onChange={(v) => patchNumber(el.id, 'lineHeight', v, 0.6, 2)}
                           />
                         </Group>
                         <Group grow>
                           <NumberInput
                             size="xs" label="Max lines" min={1} max={6}
-                            value={el.maxLines} onChange={(v) => patchElement(el.id, { maxLines: Number(v) })}
+                            value={el.maxLines} onChange={(v) => patchNumber(el.id, 'maxLines', v, 1, 6)}
                           />
                           <NumberInput
                             size="xs" label="Tracking (em)" min={-0.1} max={0.5} step={0.005} decimalScale={3}
-                            value={el.letterSpacing} onChange={(v) => patchElement(el.id, { letterSpacing: Number(v) })}
+                            value={el.letterSpacing} onChange={(v) => patchNumber(el.id, 'letterSpacing', v, -0.1, 0.5)}
                           />
                           <ColorInput
                             size="xs" label="Colour" value={el.color}
@@ -439,6 +489,9 @@ export function ThumbnailStudio({
                       loading={busy}
                     >
                       Save design
+                    </Button>
+                    <Button variant="subtle" color="red" onClick={handleReset} loading={busy}>
+                      Reset to default
                     </Button>
                   </Group>
                   {dirty && (

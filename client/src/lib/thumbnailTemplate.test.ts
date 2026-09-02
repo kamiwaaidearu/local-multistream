@@ -6,6 +6,7 @@ import {
   wrapText,
   layoutElement,
   layoutThumbnail,
+  parseNumericField,
   thumbnailFilename,
   type ThumbnailTextElement,
   type MeasureText,
@@ -248,6 +249,29 @@ describe('layoutThumbnail — linked shrinking', () => {
     };
     const laid = layoutThumbnail(tpl, vars, 1280, 720, measure);
     expect(laid.map((l) => l.fitScale)).toEqual([1, 1]);
+  });
+});
+
+describe('parseNumericField', () => {
+  it('rejects an empty field instead of coercing it to zero', () => {
+    // The bug this guards: Number('') is 0, so clearing the Font size input wrote 0, blanked the
+    // line out of the preview, and persisted that on the next Save.
+    expect(parseNumericField('', 0.01, 0.4)).toBeNull();
+    expect(parseNumericField(null, 0.01, 0.4)).toBeNull();
+    expect(parseNumericField(undefined, 0.01, 0.4)).toBeNull();
+    expect(parseNumericField('-', 0.01, 0.4)).toBeNull();
+    expect(parseNumericField(NaN, 0.01, 0.4)).toBeNull();
+  });
+
+  it('accepts real numbers, from either a string or a number', () => {
+    expect(parseNumericField('0.09', 0.01, 0.4)).toBeCloseTo(0.09, 5);
+    expect(parseNumericField(0.09, 0.01, 0.4)).toBeCloseTo(0.09, 5);
+  });
+
+  it('clamps to the field range rather than storing something unrenderable', () => {
+    expect(parseNumericField(5, 0.01, 0.4)).toBeCloseTo(0.4, 5);
+    expect(parseNumericField(-3, 0.01, 0.4)).toBeCloseTo(0.01, 5);
+    expect(parseNumericField(0, 1, 6)).toBe(1); // maxLines: 0 would disable the fit check entirely
   });
 });
 

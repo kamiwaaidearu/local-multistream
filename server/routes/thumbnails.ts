@@ -47,6 +47,23 @@ interface TemplateRow {
   sort_order: number;
 }
 
+/**
+ * Whether a template's plate URL still points at a file we actually serve.
+ *
+ * Only paths under the plates directory are checked — anything else (an absolute URL, say) is
+ * treated as unverifiable rather than missing, so this never throws away a reference it does not
+ * own. `basename` also keeps a crafted `../` path from escaping the directory.
+ */
+function plateExists(plate: string | null | undefined): plate is string {
+  if (!plate || !plate.startsWith('/uploads/thumbnails/')) return false;
+  const name = path.basename(plate);
+  try {
+    return fs.statSync(path.join(PLATES_DIR, name)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function serialise(row: TemplateRow) {
   return { id: row.id, name: row.name, sort_order: row.sort_order, config: JSON.parse(row.config_json) };
 }
@@ -114,16 +131,19 @@ thumbnailRouter.patch('/templates/:id', (req: Request, res: Response) => {
 thumbnailRouter.delete('/templates/:id', (req: Request, res: Response) => {
   const id = param(req, 'id');
   const db = getDb();
+  // Existence first, then the last-template guard: checking the count first reported "cannot delete
+  // the last template" for an id that was never there, which is a misleading reason for a 404.
+  const exists = db.prepare('SELECT 1 FROM thumbnail_templates WHERE id = ?').get(id);
+  if (!exists) {
+    res.status(404).json({ error: 'Template not found' });
+    return;
+  }
   const remaining = (db.prepare('SELECT COUNT(*) AS n FROM thumbnail_templates').get() as { n: number }).n;
   if (remaining <= 1) {
     res.status(409).json({ error: 'Cannot delete the last thumbnail template' });
     return;
   }
-  const result = db.prepare('DELETE FROM thumbnail_templates WHERE id = ?').run(id);
-  if (result.changes === 0) {
-    res.status(404).json({ error: 'Template not found' });
-    return;
-  }
+  db.prepare('DELETE FROM thumbnail_templates WHERE id = ?').run(id);
   res.status(204).end();
 });
 
@@ -135,10 +155,11 @@ thumbnailRouter.post('/templates/reset', (_req: Request, res: Response) => {
       | { config_json: string }
       | undefined;
     // A plate the operator picked is theirs to keep — resetting the layout should not force them to
-    // re-pick their background image. Falling back to the seed's own plate (rather than to null)
-    // means a reset after clearing the plate restores the stock one instead of leaving flat blue.
+    // re-pick their background image. But only if it still resolves: preserving a plate whose file
+    // has been deleted meant "Reset to default" could not recover a template that renders flat
+    // colour, which is the main thing someone reaching for reset is trying to fix.
     const chosenPlate = existing ? (JSON.parse(existing.config_json).plate as string | null) : null;
-    const config = { ...tpl.config, plate: chosenPlate ?? tpl.config.plate };
+    const config = { ...tpl.config, plate: plateExists(chosenPlate) ? chosenPlate : tpl.config.plate };
     db.prepare(
       'INSERT INTO thumbnail_templates (id, name, config_json, sort_order) VALUES (?, ?, ?, ?)' +
         ' ON CONFLICT(id) DO UPDATE SET name = excluded.name, config_json = excluded.config_json, sort_order = excluded.sort_order',

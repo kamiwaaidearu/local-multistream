@@ -121,19 +121,43 @@ function authedFetch(url: string, init?: RequestInit): Promise<Response> {
   });
 }
 
+/**
+ * A multipart POST/PATCH that actually fails when the server says it failed.
+ *
+ * The FormData endpoints used to be `authedFetch(...).then((r) => r.json())`, which resolves happily
+ * on a 500 because the error body is still valid JSON. A rejected upload (multer's 2MB limit, a
+ * wrong MIME type) therefore surfaced to the operator as success — a whole series reported as
+ * "created" when the transaction had rolled back and nothing existed.
+ *
+ * Deliberately does NOT do the 401 redirect that `request()` does: being bounced to the login screen
+ * on a transient 401 mid-broadcast is worse than seeing the error.
+ */
+async function authedForm<T>(url: string, formData: FormData, method = 'POST'): Promise<T> {
+  const res = await authedFetch(url, { method, body: formData });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new ApiError(
+      (body as { error?: string } | null)?.error ?? `${method} ${url} failed (${res.status})`,
+      res.status,
+    );
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json() as Promise<T>;
+}
+
 export const api = {
   // Streams
   getStreams: () => request<unknown[]>('/api/streams'),
   createStream: (formData: FormData) =>
-    authedFetch('/api/streams', { method: 'POST', body: formData }).then((r) => r.json()),
+    authedForm<unknown>('/api/streams', formData),
   getStream: (id: string) => request<unknown>(`/api/streams/${id}`),
   updateStream: (id: string, formData: FormData) =>
-    authedFetch(`/api/streams/${id}`, { method: 'PATCH', body: formData }).then((r) => r.json()),
+    authedForm<unknown>(`/api/streams/${id}`, formData, 'PATCH'),
   deleteStream: (id: string) => request<void>(`/api/streams/${id}`, { method: 'DELETE' }),
 
   // Series
   createSeries: (formData: FormData) =>
-    authedFetch('/api/series', { method: 'POST', body: formData }).then((r) => r.json()),
+    authedForm<unknown>('/api/series', formData),
   getSeries: (seriesId: string) => request<unknown>(`/api/series/${seriesId}`),
   setupSeries: (seriesId: string) =>
     request<unknown>(`/api/series/${seriesId}/setup`, { method: 'POST' }),
@@ -214,7 +238,7 @@ export const api = {
   resetTemplate: () =>
     request<{ config_json: Record<string, unknown>; id: string; name: string }>('/api/studio/template/reset', { method: 'POST' }),
   uploadOverlay: (formData: FormData) =>
-    authedFetch('/api/studio/overlay', { method: 'POST', body: formData }).then((r) => r.json()),
+    authedForm<{ url: string; filename: string }>('/api/studio/overlay', formData),
 
   // Thumbnails
   getThumbnailTemplates: () => request<StoredThumbnailTemplate[]>('/api/thumbnails/templates'),
@@ -228,10 +252,7 @@ export const api = {
     request<StoredThumbnailTemplate[]>('/api/thumbnails/templates/reset', { method: 'POST' }),
   getThumbnailPlates: () => request<ThumbnailPlate[]>('/api/thumbnails/plates'),
   uploadThumbnailPlate: (formData: FormData) =>
-    authedFetch('/api/thumbnails/plates', { method: 'POST', body: formData }).then((r) => {
-      if (!r.ok) return r.json().then((b) => Promise.reject(new Error(b.error ?? 'Upload failed')));
-      return r.json() as Promise<ThumbnailPlate>;
-    }),
+    authedForm<ThumbnailPlate>('/api/thumbnails/plates', formData),
 
   // Settings — Facebook reminder schedule
   getReminderSettings: () => request<ReminderSettings>('/api/settings/reminders'),
