@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import {
+  Alert,
   TextInput,
   Textarea,
   Button,
@@ -40,6 +41,14 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
   const [saving, setSaving] = useState(false);
   const [generatorOpen, setGeneratorOpen] = useState(false);
   const isNew = initialData === undefined;
+
+  // True when editing a stream whose name has been changed but whose existing thumbnail has not been
+  // replaced — the case where the saved image still shows the previous title.
+  const titleChangedSinceSave =
+    !isNew &&
+    !thumbnail &&
+    !!initialData?.thumbnail_path &&
+    name.trim() !== (initialData?.name ?? '').trim();
 
   useEffect(() => {
     if (initialData) {
@@ -126,8 +135,25 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
           </Button>
         </Group>
 
-        {thumbnailPreview && (
-          <Image src={thumbnailPreview} height={180} radius="md" alt="Thumbnail preview" />
+        {/* Falls back to the thumbnail already on the stream. Without this the edit form showed a
+            preview only for a newly picked file, so there was no way to see what was actually set. */}
+        {(thumbnailPreview || initialData?.thumbnail_path) && (
+          <Image
+            src={thumbnailPreview ?? initialData?.thumbnail_path ?? undefined}
+            height={180}
+            fit="contain"
+            radius="md"
+            alt={thumbnailPreview ? 'New thumbnail preview' : 'Current thumbnail'}
+          />
+        )}
+
+        {/* The thumbnail is rendered once, at save time, so renaming a stream leaves its image
+            showing the old title. Nothing else would tell the operator that. */}
+        {titleChangedSinceSave && (
+          <Alert color="yellow" title="Thumbnail may show the old title">
+            The name has changed but the thumbnail has not been regenerated. If it was generated from
+            the title, press Generate to bring it up to date.
+          </Alert>
         )}
 
         <DateTimePicker

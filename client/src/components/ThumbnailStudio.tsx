@@ -240,6 +240,37 @@ export function ThumbnailStudio({
     }
   }
 
+  /** Deletes the current template. The server refuses to remove the last one. */
+  async function handleDelete() {
+    if (!working) return;
+    if (!window.confirm(`Delete the template "${working.name}"? This cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      await api.deleteThumbnailTemplate(working.id);
+      const remaining = await api.getThumbnailTemplates();
+      await reload();
+      // Move to whatever is left, or the editor would keep showing a template that no longer exists.
+      const next = remaining[0];
+      if (next) {
+        setSelectedId(next.id);
+        setWorking(structuredClone(next.config));
+        setDirty(false);
+      }
+      notifications.show({ title: 'Deleted', message: `Removed "${working.name}"`, color: 'green' });
+    } catch (err) {
+      notifications.show({ title: 'Error', message: String(err), color: 'red' });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Switching templates throws away unsaved Design edits, so confirm before it happens. */
+  function handleSelectTemplate(id: string | null) {
+    if (!id || id === working?.id) return;
+    if (dirty && !window.confirm('Switch template and discard your unsaved design changes?')) return;
+    setSelectedId(id);
+  }
+
   async function handleUploadPlate(file: File | null) {
     if (!file) return;
     setBusy(true);
@@ -276,7 +307,7 @@ export function ThumbnailStudio({
             label="Template"
             data={templates.map((t) => ({ value: t.id, label: t.name }))}
             value={working.id}
-            onChange={setSelectedId}
+            onChange={handleSelectTemplate}
             allowDeselect={false}
           />
 
@@ -492,6 +523,15 @@ export function ThumbnailStudio({
                     </Button>
                     <Button variant="subtle" color="red" onClick={handleReset} loading={busy}>
                       Reset to default
+                    </Button>
+                    <Button
+                      variant="subtle"
+                      color="red"
+                      onClick={handleDelete}
+                      loading={busy}
+                      disabled={templates.length <= 1}
+                    >
+                      Delete template
                     </Button>
                   </Group>
                   {dirty && (

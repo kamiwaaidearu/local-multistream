@@ -68,13 +68,42 @@ function serialise(row: TemplateRow) {
   return { id: row.id, name: row.name, sort_order: row.sort_order, config: JSON.parse(row.config_json) };
 }
 
+/**
+ * Serialises a list of rows, dropping any whose stored config will not parse.
+ *
+ * One unparseable row used to throw out of the route handler and 500 the whole listing, which takes
+ * the entire thumbnail UI down rather than losing the one broken template. Skipping and logging
+ * keeps every other template usable, and the operator can restore the stock ones with reset.
+ */
+/** Parses a stored config, or null if the row is corrupt. */
+function safeParseConfig(json: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(json);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function serialiseAll(rows: TemplateRow[]) {
+  const out: ReturnType<typeof serialise>[] = [];
+  for (const row of rows) {
+    try {
+      out.push(serialise(row));
+    } catch (err) {
+      console.error(`[thumbnails] Skipping template '${row.id}' — its stored config is not valid JSON:`, err);
+    }
+  }
+  return out;
+}
+
 // --- Templates ---
 
 thumbnailRouter.get('/templates', (_req: Request, res: Response) => {
   const rows = getDb()
     .prepare('SELECT id, name, config_json, sort_order FROM thumbnail_templates ORDER BY sort_order ASC, name ASC')
     .all() as unknown as TemplateRow[];
-  res.json(rows.map(serialise));
+  res.json(serialiseAll(rows));
 });
 
 thumbnailRouter.post('/templates', (req: Request, res: Response) => {
@@ -114,10 +143,21 @@ thumbnailRouter.patch('/templates/:id', (req: Request, res: Response) => {
   const nextName = typeof name === 'string' && name.trim() ? name.trim() : existing.name;
   // The config carries its own id/name copy so a template stays self-describing once exported to a
   // client; keep them in step with the row rather than trusting whatever the client sent.
-  const nextConfig =
-    typeof config === 'object' && config !== null
-      ? { ...config, id, name: nextName }
-      : { ...JSON.parse(existing.config_json), name: nextName };
+  let nextConfig: Record<string, unknown>;
+  if (typeof config === 'object' && config !== null) {
+    nextConfig = { ...config, id, name: nextName };
+  } else {
+    // A rename with no config body has to read the stored one. If that is unreadable, say so rather
+    // than throwing a 500 or writing a config with nothing but a name in it.
+    const stored = safeParseConfig(existing.config_json);
+    if (!stored) {
+      res.status(409).json({
+        error: 'This template\'s stored design is unreadable. Use "Reset to default" to restore it.',
+      });
+      return;
+    }
+    nextConfig = { ...stored, id, name: nextName };
+  }
 
   db.prepare('UPDATE thumbnail_templates SET name = ?, config_json = ?, sort_order = ? WHERE id = ?')
     .run(nextName, JSON.stringify(nextConfig), typeof sort_order === 'number' ? sort_order : existing.sort_order, id);
@@ -158,7 +198,11 @@ thumbnailRouter.post('/templates/reset', (_req: Request, res: Response) => {
     // re-pick their background image. But only if it still resolves: preserving a plate whose file
     // has been deleted meant "Reset to default" could not recover a template that renders flat
     // colour, which is the main thing someone reaching for reset is trying to fix.
-    const chosenPlate = existing ? (JSON.parse(existing.config_json).plate as string | null) : null;
+    // Parsed defensively: reset is the recovery path FOR a corrupt row, so it must not be the one
+    // thing that cannot survive one.
+    const chosenPlate = existing
+      ? ((safeParseConfig(existing.config_json)?.plate as string | null | undefined) ?? null)
+      : null;
     const config = { ...tpl.config, plate: plateExists(chosenPlate) ? chosenPlate : tpl.config.plate };
     db.prepare(
       'INSERT INTO thumbnail_templates (id, name, config_json, sort_order) VALUES (?, ?, ?, ?)' +
@@ -168,7 +212,7 @@ thumbnailRouter.post('/templates/reset', (_req: Request, res: Response) => {
   const rows = db
     .prepare('SELECT id, name, config_json, sort_order FROM thumbnail_templates ORDER BY sort_order ASC, name ASC')
     .all() as unknown as TemplateRow[];
-  res.json(rows.map(serialise));
+  res.json(serialiseAll(rows));
 });
 
 // --- Plates (background images) ---
