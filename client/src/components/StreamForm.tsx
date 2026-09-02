@@ -11,6 +11,7 @@ import {
 } from '@mantine/core';
 import { DateTimePicker } from '@mantine/dates';
 import { notifications } from '@mantine/notifications';
+import { ThumbnailStudio } from './ThumbnailStudio';
 
 interface StreamFormData {
   name: string;
@@ -37,6 +38,7 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
   // after its YouTube broadcast already exists would not retroactively make it private.
   const [isTest, setIsTest] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [generatorOpen, setGeneratorOpen] = useState(false);
   const isNew = initialData === undefined;
 
   useEffect(() => {
@@ -52,7 +54,19 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
     }
   }, [initialData]);
 
-  const thumbnailPreview = thumbnail ? URL.createObjectURL(thumbnail) : null;
+  // Held in state and revoked on change, rather than minted inline during render: the generator
+  // makes a picked thumbnail the common case, and an inline createObjectURL would leak one blob URL
+  // per keystroke in the fields above.
+  const [thumbnailPreview, setThumbnailPreview] = useState<string | null>(null);
+  useEffect(() => {
+    if (!thumbnail) {
+      setThumbnailPreview(null);
+      return;
+    }
+    const url = URL.createObjectURL(thumbnail);
+    setThumbnailPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [thumbnail]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -97,13 +111,20 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
           onChange={(e) => setDescription(e.currentTarget.value)}
         />
 
-        <FileInput
-          label="Thumbnail"
-          description="JPEG or PNG, max 2MB, recommended 1280x720"
-          accept="image/jpeg,image/png"
-          value={thumbnail}
-          onChange={setThumbnail}
-        />
+        <Group align="end">
+          <FileInput
+            label="Thumbnail"
+            description="JPEG or PNG, max 2MB, recommended 1280x720"
+            accept="image/jpeg,image/png"
+            value={thumbnail}
+            onChange={setThumbnail}
+            clearable
+            style={{ flex: 1 }}
+          />
+          <Button variant="light" onClick={() => setGeneratorOpen(true)}>
+            Generate
+          </Button>
+        </Group>
 
         {thumbnailPreview && (
           <Image src={thumbnailPreview} height={180} radius="md" alt="Thumbnail preview" />
@@ -145,6 +166,14 @@ export function StreamForm({ initialData, onSave, onCancel, saveLabel = 'Save' }
           </Button>
         </Group>
       </Stack>
+
+      <ThumbnailStudio
+        opened={generatorOpen}
+        onClose={() => setGeneratorOpen(false)}
+        title={name}
+        date={scheduledStart}
+        onUse={(file) => setThumbnail(file)}
+      />
     </form>
   );
 }

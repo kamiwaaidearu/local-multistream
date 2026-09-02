@@ -36,3 +36,8 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# The stock thumbnail plate IS committed: the seeded thumbnail templates point at it, so a fresh
+# checkout must have it or every default template renders on flat blue.
+!uploads/thumbnails/
+!uploads/thumbnails/recommit-to-christ.jpg

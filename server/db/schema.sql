@@ -54,3 +54,13 @@ CREATE TABLE IF NOT EXISTS studio_templates (
   is_default  INTEGER DEFAULT 0,
   created_at  TEXT DEFAULT (datetime('now'))
 );
+
+-- Thumbnail templates: a brand plate image plus positioned text elements. See
+-- client/src/lib/thumbnailTemplate.ts for the shape of config_json.
+CREATE TABLE IF NOT EXISTS thumbnail_templates (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT DEFAULT (datetime('now'))
+);

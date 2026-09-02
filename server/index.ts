@@ -8,6 +8,7 @@ import { getDb, closeDb } from './db/index.js';
 import { apiRouter } from './routes/api.js';
 import { authRouter } from './routes/auth.js';
 import { studioRouter } from './routes/studio.js';
+import { thumbnailRouter } from './routes/thumbnails.js';
 import { authMiddleware, handleLogin, handleAuthCheck } from './studio/auth.js';
 import { getOrCreateCert } from './cert.js';
 import { initFileLogging, closeFileLogging } from './logging.js';
@@ -51,6 +52,7 @@ app.use('/api', authMiddleware);
 app.use('/api', apiRouter);
 app.use('/auth', authRouter);
 app.use('/api/studio', studioRouter);
+app.use('/api/thumbnails', thumbnailRouter);
 
 // Serve React app in production
 const clientDist = path.join(__dirname, '..', 'client', 'dist');

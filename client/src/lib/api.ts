@@ -1,4 +1,21 @@
 import { getAuthToken, clearAuthToken } from './authToken';
+import type { ThumbnailTemplate } from './thumbnailTemplate';
+
+/** A thumbnail template as the server stores it: the row plus its parsed design config. */
+export interface StoredThumbnailTemplate {
+  id: string;
+  name: string;
+  sort_order: number;
+  config: ThumbnailTemplate;
+}
+
+/** An uploaded background plate available for templates to sit on. */
+export interface ThumbnailPlate {
+  url: string;
+  name: string;
+  size?: number;
+  uploadedAt?: number;
+}
 
 const BASE = '';
 
@@ -198,6 +215,23 @@ export const api = {
     request<{ config_json: Record<string, unknown>; id: string; name: string }>('/api/studio/template/reset', { method: 'POST' }),
   uploadOverlay: (formData: FormData) =>
     authedFetch('/api/studio/overlay', { method: 'POST', body: formData }).then((r) => r.json()),
+
+  // Thumbnails
+  getThumbnailTemplates: () => request<StoredThumbnailTemplate[]>('/api/thumbnails/templates'),
+  createThumbnailTemplate: (data: { name: string; config: ThumbnailTemplate }) =>
+    request<StoredThumbnailTemplate>('/api/thumbnails/templates', { method: 'POST', body: JSON.stringify(data) }),
+  updateThumbnailTemplate: (id: string, data: { name?: string; config?: ThumbnailTemplate }) =>
+    request<StoredThumbnailTemplate>(`/api/thumbnails/templates/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteThumbnailTemplate: (id: string) =>
+    request<void>(`/api/thumbnails/templates/${id}`, { method: 'DELETE' }),
+  resetThumbnailTemplates: () =>
+    request<StoredThumbnailTemplate[]>('/api/thumbnails/templates/reset', { method: 'POST' }),
+  getThumbnailPlates: () => request<ThumbnailPlate[]>('/api/thumbnails/plates'),
+  uploadThumbnailPlate: (formData: FormData) =>
+    authedFetch('/api/thumbnails/plates', { method: 'POST', body: formData }).then((r) => {
+      if (!r.ok) return r.json().then((b) => Promise.reject(new Error(b.error ?? 'Upload failed')));
+      return r.json() as Promise<ThumbnailPlate>;
+    }),
 
   // Settings — Facebook reminder schedule
   getReminderSettings: () => request<ReminderSettings>('/api/settings/reminders'),

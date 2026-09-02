@@ -9,6 +9,8 @@ import '@mantine/core/styles.css';
 import '@mantine/dates/styles.css';
 import '@mantine/notifications/styles.css';
 import '@mantine/dropzone/styles.css';
+// Self-hosted Source Sans 3 — the typeface thumbnails are rendered in. See styles/fonts.css.
+import './styles/fonts.css';
 
 // A data router (vs. <BrowserRouter>) so App can use useBlocker to guard navigation while a Web
 // Studio stream is live. App keeps its own descendant <Routes>; this splat just hosts it.

@@ -60,6 +60,91 @@ export const DEFAULT_GRID_TEMPLATE = {
   ],
 };
 
+// Canonical seed thumbnail templates. Like DEFAULT_GRID_TEMPLATE above, these live server-side so
+// there is exactly one source of truth; the client only carries types.
+//
+// The geometry is the Figma design's own numbers, not an approximation. Figma's frame is 1280x720
+// (the plate exports at 2560x1440, i.e. 2x), and its CSS for the two text layers is:
+//
+//   Main Title:  top 490px, width 1020px, Source Sans Pro 700, 88px/111px, centred, #FFFFFF
+//   Sub Text:    top 606px, width 1020px, Source Sans Pro 700, 70px/88px,  centred, #FFFFFF
+//
+// Stored normalised (0..1 of the render box) so the same template renders identically at 1280x720
+// for the upload and at 1920x1080 if a larger asset is ever wanted. Figma's per-layer horizontal
+// nudges (+1px and +14px off centre) are box rounding artifacts, not design intent — both layers
+// read as centred in the exports, so both are centred here.
+const PLATE_RECOMMIT = '/uploads/thumbnails/recommit-to-christ.jpg';
+
+/** Figma "Main Title": the big line, filled per week. */
+const MAIN_TITLE = {
+  id: 'main',
+  label: 'Main title',
+  text: '{{title}}',
+  editable: true,
+  x: 0.5,
+  y: 490 / 720,
+  maxWidth: 1020 / 1280,
+  // The Figma box holds exactly one line, so an over-long title shrinks to fit rather than wrapping
+  // down into the sub text. The editor flags anything that had to shrink.
+  maxLines: 1,
+  align: 'center' as const,
+  vAlign: 'top' as const,
+  fontSize: 88 / 720,
+  fontWeight: 700,
+  italic: false,
+  uppercase: false,
+  color: '#ffffff',
+  lineHeight: 111 / 88,
+  letterSpacing: 0,
+  scaleWith: null as string | null,
+};
+
+/** Figma "Sub Text": the smaller line beneath it. */
+const SUB_TEXT = {
+  ...MAIN_TITLE,
+  id: 'sub',
+  label: 'Sub text',
+  text: '{{date}}',
+  y: 606 / 720,
+  fontSize: 70 / 720,
+  lineHeight: 88 / 70,
+  // Follows the title down when a long title has to shrink, so the date never ends up with more
+  // prominence than the title it sits under.
+  scaleWith: 'main' as string | null,
+};
+
+export const DEFAULT_THUMBNAIL_TEMPLATES = [
+  {
+    id: 'weekly',
+    name: 'Weekly',
+    sort_order: 0,
+    config: {
+      id: 'weekly',
+      name: 'Weekly',
+      backgroundColor: '#0d4d8c',
+      plate: PLATE_RECOMMIT,
+      elements: [MAIN_TITLE, SUB_TEXT],
+    },
+  },
+  {
+    // Same two slots as Weekly — only the copy differs. The plate already carries the "RECOMMIT TO
+    // CHRIST" eyebrow, so a special edition is a wording change, not a different layout.
+    id: 'latin',
+    name: 'Latin special edition',
+    sort_order: 1,
+    config: {
+      id: 'latin',
+      name: 'Latin special edition',
+      backgroundColor: '#0d4d8c',
+      plate: PLATE_RECOMMIT,
+      elements: [
+        { ...MAIN_TITLE, text: 'SPECIAL EDITION', uppercase: true },
+        { ...SUB_TEXT, text: '{{title}}' },
+      ],
+    },
+  },
+];
+
 let db: DatabaseSync;
 
 export function getDb(): DatabaseSync {
@@ -78,6 +163,17 @@ export function getDb(): DatabaseSync {
         'INSERT INTO studio_templates (id, name, config_json, is_default) VALUES (?, ?, ?, 1)',
       ).run('default', 'RosaryMen Standard', JSON.stringify(DEFAULT_GRID_TEMPLATE));
       console.log('[db] Seeded default studio template');
+    }
+
+    // Seed the stock thumbnail templates. Insert-if-absent by id rather than "seed only when the
+    // table is empty", so a later release can add a template without wiping the operator's edits to
+    // the ones already there.
+    const insertThumbTpl = db.prepare(
+      'INSERT OR IGNORE INTO thumbnail_templates (id, name, config_json, sort_order) VALUES (?, ?, ?, ?)',
+    );
+    for (const tpl of DEFAULT_THUMBNAIL_TEMPLATES) {
+      const result = insertThumbTpl.run(tpl.id, tpl.name, JSON.stringify(tpl.config), tpl.sort_order);
+      if (result.changes > 0) console.log(`[db] Seeded thumbnail template '${tpl.id}'`);
     }
 
     // Migrate old layer-based template to grid format
