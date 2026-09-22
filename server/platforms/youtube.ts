@@ -148,15 +148,11 @@ export async function createYouTubeBroadcast(
   // 3. Bind stream to broadcast
   await yt.liveBroadcasts.bind({ id: broadcastId, streamId, part: ['id', 'contentDetails'] });
 
-  // 4. Upload thumbnail if provided
+  // 4. Upload thumbnail if provided. Best-effort here: a rejected image must not cost us the
+  // broadcast we just created and bound.
   if (thumbnailPath) {
     try {
-      const fullPath = join(__dirname, '..', '..', thumbnailPath);
-      const body = readFileSync(fullPath);
-      await yt.thumbnails.set({
-        videoId: broadcastId,
-        media: { body },
-      });
+      await setYouTubeThumbnail(broadcastId, thumbnailPath);
     } catch (err) {
       console.warn('[youtube] Thumbnail upload failed:', err);
     }
@@ -346,6 +342,17 @@ export async function updateYouTubeBroadcast(
     part: ['snippet'],
     requestBody: { id: broadcastId, snippet },
   });
+}
+
+/**
+ * Set (or replace) a broadcast's custom thumbnail from an app-relative upload path
+ * (e.g. `/uploads/abc123`). Throws on failure so editing callers can surface it — the create path
+ * wraps it in its own best-effort catch.
+ */
+export async function setYouTubeThumbnail(broadcastId: string, thumbnailPath: string): Promise<void> {
+  const yt = getYouTube();
+  const body = readFileSync(join(__dirname, '..', '..', thumbnailPath));
+  await yt.thumbnails.set({ videoId: broadcastId, media: { body } });
 }
 
 /**

@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 import { nanoid } from 'nanoid';
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { DEFAULT_REMINDER_SETTINGS, REMINDER_SETTINGS_KEY, type ReminderSettings } from '../stream/reminders.js';
+import { planSwap, swapRefusalReason, type SwappableStream } from '../stream/swapPolicy.js';
+import type { StreamMetadataChange } from '../stream/manager.js';
 import type { Stream, PlatformStream } from '../types.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -105,60 +107,22 @@ apiRouter.patch('/streams/:id', upload.single('thumbnail'), async (req: Request,
     db.prepare(`UPDATE streams SET ${updates.join(', ')} WHERE id = ?`).run(...values);
   }
 
-  // Sync changes to YouTube/Facebook if platform_streams exist with 'created' status
+  // Sync changes out to the destinations that already exist for this stream, and re-sync the
+  // scheduled Facebook announcement posts when the details that feed them change (or the reminders
+  // toggle flips). Already-published posts are left as-is.
   const updated = db.prepare('SELECT * FROM streams WHERE id = ?').get(id) as unknown as Stream;
-  const platformStreams = db.prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'").all(id) as unknown as PlatformStream[];
 
-  const syncWarnings: string[] = [];
+  const { syncStreamMetadata } = await import('../stream/manager.js');
+  const change: StreamMetadataChange = {
+    resyncReminders: name !== undefined || description !== undefined
+      || scheduled_start !== undefined || req.body.fb_reminders_enabled !== undefined,
+  };
+  if (name !== undefined) change.name = name as string;
+  if (description !== undefined) change.description = description as string;
+  if (scheduled_start !== undefined) change.scheduledStart = scheduled_start ? parseInt(scheduled_start as string) : null;
+  if (thumbnail_path !== undefined) change.thumbnailPath = thumbnail_path;
 
-  for (const ps of platformStreams) {
-    try {
-      if (ps.platform === 'youtube' && ps.broadcast_id) {
-        const { updateYouTubeBroadcast } = await import('../platforms/youtube.js');
-        await updateYouTubeBroadcast(
-          ps.broadcast_id,
-          name as string | undefined,
-          description as string | undefined,
-          scheduled_start !== undefined ? (scheduled_start ? parseInt(scheduled_start as string) : null) : undefined,
-        );
-        // Re-upload thumbnail if changed
-        if (thumbnail_path) {
-          const { google } = await import('googleapis');
-          const { getYouTubeAuth } = await import('../auth/youtube.js');
-          const auth = getYouTubeAuth();
-          if (auth) {
-            const yt = google.youtube({ version: 'v3', auth });
-            const { readFileSync } = await import('fs');
-            const fullPath = path.join(__dirname, '..', '..', thumbnail_path);
-            const body = readFileSync(fullPath);
-            await yt.thumbnails.set({ videoId: ps.broadcast_id, media: { body } });
-          }
-        }
-      } else if (ps.platform === 'facebook' && ps.broadcast_id) {
-        const { updateFacebookLiveVideo } = await import('../platforms/facebook.js');
-        await updateFacebookLiveVideo(
-          ps.broadcast_id,
-          name as string | undefined,
-          description as string | undefined,
-        );
-      }
-      // Twitch: just update locally (applied at go-live)
-    } catch (err) {
-      syncWarnings.push(`${ps.platform}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  // Re-sync scheduled Facebook announcement posts when the details that feed them change (or the
-  // reminders toggle flips). Re-creates the still-pending posts from the new details; already-
-  // published ones are left as-is. No-op if Facebook isn't set up for this stream yet.
-  if (name !== undefined || description !== undefined || scheduled_start !== undefined || req.body.fb_reminders_enabled !== undefined) {
-    try {
-      const { resyncFacebookReminders } = await import('../stream/manager.js');
-      await resyncFacebookReminders(id);
-    } catch (err) {
-      syncWarnings.push(`Facebook reminders: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  const syncWarnings = await syncStreamMetadata(id, change);
 
   const response: Record<string, unknown> = { ...updated };
   if (syncWarnings.length > 0) {
@@ -269,6 +233,92 @@ apiRouter.get('/series/:seriesId', (req: Request, res: Response) => {
     return;
   }
   res.json({ series_id: seriesId, streams });
+});
+
+/**
+ * Swap the CONTENT of two events, leaving their dates where they are.
+ *
+ * Name, description and thumbnail trade places; the schedule, the series, the per-event Facebook
+ * reminder toggle and the platform destinations all stay put. The existing YouTube broadcast and
+ * Facebook live video are re-titled in place (they keep their ids and their scheduled times), and
+ * each event's still-pending Facebook announcement posts are recreated from its new details.
+ *
+ * Typically used within a series when the running order of topics changes, but it deliberately
+ * doesn't require the two events to share a series — any two editable events will swap.
+ */
+apiRouter.post('/streams/:id/swap', async (req: Request, res: Response) => {
+  const db = getDb();
+  const id = param(req, 'id');
+  const otherId = typeof req.body?.other_id === 'string' ? req.body.other_id : '';
+  if (!otherId) {
+    res.status(400).json({ error: 'other_id is required' });
+    return;
+  }
+
+  const get = (streamId: string) =>
+    db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId) as unknown as Stream | undefined;
+  const a = get(id);
+  const b = get(otherId);
+  if (!a || !b) {
+    res.status(404).json({ error: 'Stream not found' });
+    return;
+  }
+
+  const refusal = swapRefusalReason(a as SwappableStream, b as SwappableStream);
+  if (refusal) {
+    res.status(400).json({ error: refusal });
+    return;
+  }
+
+  const assignments = planSwap(a as SwappableStream, b as SwappableStream);
+
+  // All-or-nothing: a half-applied swap would leave two events sharing one title.
+  const updateStmt = db.prepare('UPDATE streams SET name = ?, description = ?, thumbnail_path = ? WHERE id = ?');
+  db.exec('BEGIN');
+  try {
+    for (const next of assignments) {
+      updateStmt.run(next.name, next.description, next.thumbnail_path, next.id);
+    }
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+
+  const logStmt = db.prepare('INSERT INTO event_log (stream_id, platform, event, detail, ts) VALUES (?, ?, ?, ?, ?)');
+  const { syncStreamMetadata } = await import('../stream/manager.js');
+  const syncWarnings: string[] = [];
+
+  for (const next of assignments) {
+    const before = next.id === a.id ? a : b;
+    logStmt.run(next.id, null, 'content_swapped', `"${before.name}" → "${next.name}" (with ${next.id === a.id ? b.id : a.id})`, Date.now());
+
+    const warnings = await syncStreamMetadata(next.id, {
+      name: next.name,
+      description: next.description,
+      thumbnailPath: next.thumbnail_path,
+      resyncReminders: true,
+    });
+
+    // YouTube's API can set a custom thumbnail but not remove one, so an event that swaps in a
+    // blank thumbnail keeps the old image on YouTube. Say so rather than let it go unnoticed.
+    if (before.thumbnail_path && !next.thumbnail_path) {
+      const hasYouTube = db
+        .prepare("SELECT 1 FROM platform_streams WHERE stream_id = ? AND platform = 'youtube' AND status = 'created'")
+        .get(next.id);
+      if (hasYouTube) {
+        warnings.push('youtube: the other event has no thumbnail, and YouTube cannot remove a custom thumbnail — the previous image is still on the broadcast');
+      }
+    }
+
+    syncWarnings.push(...warnings.map((w) => `${next.name}: ${w}`));
+  }
+
+  const streams = assignments.map((next) => get(next.id));
+  const response: Record<string, unknown> = { streams };
+  if (syncWarnings.length > 0) response.sync_warnings = syncWarnings;
+  res.json(response);
 });
 
 // --- Setup & Go Live ---

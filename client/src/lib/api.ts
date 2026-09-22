@@ -154,6 +154,13 @@ export const api = {
   updateStream: (id: string, formData: FormData) =>
     authedForm<unknown>(`/api/streams/${id}`, formData, 'PATCH'),
   deleteStream: (id: string) => request<void>(`/api/streams/${id}`, { method: 'DELETE' }),
+  // Trade two events' name/description/thumbnail while both keep their own date. The server
+  // re-titles the existing destinations and rebuilds the pending Facebook announcement posts.
+  swapStreams: (id: string, otherId: string) =>
+    request<{ streams: unknown[]; sync_warnings?: string[] }>(`/api/streams/${id}/swap`, {
+      method: 'POST',
+      body: JSON.stringify({ other_id: otherId }),
+    }),
 
   // Series
   createSeries: (formData: FormData) =>

@@ -4,8 +4,8 @@ import { getYouTubeAuth, probeYouTubeAuth } from '../auth/youtube.js';
 import { getFacebookPageToken, getFacebookPageUrl, probeFacebookAuth } from '../auth/facebook.js';
 import { getTwitchCredentials, probeTwitchAuth } from '../auth/twitch.js';
 import type { AuthProbe } from '../auth/authProbe.js';
-import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast } from '../platforms/youtube.js';
-import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, deleteFacebookLiveVideo, resolveFacebookVideoId } from '../platforms/facebook.js';
+import { createYouTubeBroadcast, transitionToLive, endYouTubeBroadcast, updateYouTubeBroadcast, setYouTubeThumbnail } from '../platforms/youtube.js';
+import { createFacebookLiveVideo, endFacebookLiveVideo, publishFacebookLiveVideo, createScheduledPagePost, createPagePost, deletePagePost, deleteFacebookLiveVideo, resolveFacebookVideoId, updateFacebookLiveVideo } from '../platforms/facebook.js';
 import { updateTwitchChannel, getTwitchStreamKey, getTwitchVodUrl } from '../platforms/twitch.js';
 import { getTwitchChannelInfo } from '../auth/twitch.js';
 import { getReminderSettings, computeReminderTime, renderReminder } from './reminders.js';
@@ -113,6 +113,72 @@ export async function resyncFacebookReminders(streamId: string): Promise<void> {
   db.prepare('UPDATE platform_streams SET extra_json = ? WHERE id = ?')
     .run(all.length ? JSON.stringify({ announcement_posts: all }) : null, fbPs.id);
   logEvent(streamId, 'facebook', 'announcements_resynced', `${pending.length} replaced, ${fresh.length} pending`);
+}
+
+/** A change to a stream's details that already landed in the database and now has to reach out. */
+export interface StreamMetadataChange {
+  /** Omit a field to leave the platform's current value alone; pass it to push the new one. */
+  name?: string;
+  description?: string | null;
+  scheduledStart?: number | null;
+  /** App-relative upload path (`/uploads/...`), when the thumbnail changed. */
+  thumbnailPath?: string | null;
+  /** Re-create the still-pending Facebook announcement posts from the stream's current details. */
+  resyncReminders?: boolean;
+}
+
+/**
+ * Push a stream's already-saved details out to the destinations that were created for it, and
+ * re-sync its scheduled Facebook announcement posts.
+ *
+ * Shared by the edit route and the swap route so a destination can't be updated by one path and
+ * forgotten by the other. Returns human-readable warnings rather than throwing: the database is
+ * already the source of truth at this point, so a platform that refuses an update is something to
+ * report, not a reason to fail the whole request and leave the operator unsure what took effect.
+ */
+export async function syncStreamMetadata(streamId: string, change: StreamMetadataChange): Promise<string[]> {
+  const db = getDb();
+  const warnings: string[] = [];
+  const platformStreams = db
+    .prepare("SELECT * FROM platform_streams WHERE stream_id = ? AND status = 'created'")
+    .all(streamId) as unknown as PlatformStream[];
+
+  // An absent `description` means "leave it"; an explicit null means "clear it", which reaches the
+  // platforms as an empty string. Collapsing the two would let a swap with an event that has no
+  // description leave the old event's text sitting on YouTube and Facebook.
+  const description = 'description' in change ? change.description ?? '' : undefined;
+
+  for (const ps of platformStreams) {
+    try {
+      if (ps.platform === 'youtube' && ps.broadcast_id) {
+        await updateYouTubeBroadcast(
+          ps.broadcast_id,
+          change.name,
+          description,
+          change.scheduledStart,
+        );
+        if (change.thumbnailPath) {
+          await setYouTubeThumbnail(ps.broadcast_id, change.thumbnailPath);
+        }
+      } else if (ps.platform === 'facebook' && ps.broadcast_id) {
+        // Facebook live videos carry no custom thumbnail in this app, so only text travels here.
+        await updateFacebookLiveVideo(ps.broadcast_id, change.name, description);
+      }
+      // Twitch: nothing to update ahead of time — the channel title is applied at go-live.
+    } catch (err) {
+      warnings.push(`${ps.platform}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  if (change.resyncReminders) {
+    try {
+      await resyncFacebookReminders(streamId);
+    } catch (err) {
+      warnings.push(`Facebook reminders: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return warnings;
 }
 
 /**

@@ -14,6 +14,7 @@ import { notifications } from '@mantine/notifications';
 import { useStreams } from '../hooks/useStreams';
 import { StreamCard } from '../components/StreamCard';
 import { SeriesCreator } from '../components/SeriesCreator';
+import { SeriesSwap } from '../components/SeriesSwap';
 import { api } from '../lib/api';
 
 export function Dashboard() {
@@ -21,6 +22,8 @@ export function Dashboard() {
   const navigate = useNavigate();
   const [seriesOpen, setSeriesOpen] = useState(false);
   const [settingUpSeries, setSettingUpSeries] = useState<string | null>(null);
+  // The series whose swap dialog is open — content-only reordering, see SeriesSwap.
+  const [swappingSeries, setSwappingSeries] = useState<string | null>(null);
 
   // Set up platforms for every event in a series in one call (POST /api/series/:id/setup, which
   // runs the same per-stream setup used on the StreamPage). Draft events become 'ready'.
@@ -68,22 +71,31 @@ export function Dashboard() {
           // offer it when the whole series is still setuppable and at least one event needs it.
           const canSetupAll = seriesStreams.some((s) => s.status === 'draft')
             && seriesStreams.every((s) => s.status === 'draft' || s.status === 'ready');
+          // A swap needs two events whose content can still change.
+          const canSwap = seriesStreams.filter((s) => s.status === 'draft' || s.status === 'ready').length >= 2;
           return (
             <Stack key={seriesId} gap="xs">
               <Group justify="space-between">
                 <Text size="sm" fw={500} c="dimmed">
                   Series ({seriesStreams.length} events)
                 </Text>
-                {canSetupAll && (
-                  <Button
-                    size="xs"
-                    variant="light"
-                    loading={settingUpSeries === seriesId}
-                    onClick={() => handleSetupSeries(seriesId)}
-                  >
-                    Set up all platforms
-                  </Button>
-                )}
+                <Group gap="xs">
+                  {canSwap && (
+                    <Button size="xs" variant="subtle" onClick={() => setSwappingSeries(seriesId)}>
+                      Swap events
+                    </Button>
+                  )}
+                  {canSetupAll && (
+                    <Button
+                      size="xs"
+                      variant="light"
+                      loading={settingUpSeries === seriesId}
+                      onClick={() => handleSetupSeries(seriesId)}
+                    >
+                      Set up all platforms
+                    </Button>
+                  )}
+                </Group>
               </Group>
               <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
                 {seriesStreams.map((stream) => (
@@ -147,6 +159,16 @@ export function Dashboard() {
         opened={seriesOpen}
         onClose={() => setSeriesOpen(false)}
         onCreated={refresh}
+      />
+
+      {/* One instance for the whole page, not one per group: a series with both finished and
+          upcoming events appears in two tabs, and a per-group modal would then open twice.
+          Feeding it the entire series also lets it show the finished events as locked. */}
+      <SeriesSwap
+        opened={swappingSeries !== null}
+        onClose={() => setSwappingSeries(null)}
+        streams={streams.filter((s) => s.series_id === swappingSeries)}
+        onSwapped={refresh}
       />
     </Stack>
   );

@@ -4,7 +4,9 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, '..', '..', 'data', 'multistream.db');
+// The live database, unless MULTISTREAM_DB points elsewhere. The override exists so a test can
+// exercise real routes against a scratch file instead of the operator's actual events.
+const DB_PATH = process.env.MULTISTREAM_DB ?? join(__dirname, '..', '..', 'data', 'multistream.db');
 
 // Canonical default studio template — the single source of truth. Seeds the DB
 // on first run, backs the migration path, and is what "Reset to Default" restores.
