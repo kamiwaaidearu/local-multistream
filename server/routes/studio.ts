@@ -135,7 +135,12 @@ studioRouter.post('/quality', (req: Request, res: Response) => {
  * the person praying on camera, so nobody saw them. Routing them here puts them in the log and, via
  * the alert webhook, in front of somebody who isn't presenting.
  */
-const STUDIO_ALERT_KINDS = { uplink_congested: 'uplink_congested', track_ended: 'track_ended' } as const;
+const STUDIO_ALERT_KINDS = {
+  uplink_congested: 'uplink_congested',
+  track_ended: 'track_ended',
+  // The browser's view of a studio socket drop (close code, queued bytes) and of its recovery.
+  studio_dropped: 'studio_dropped',
+} as const;
 
 studioRouter.post('/alert', async (req: Request, res: Response) => {
   const { kind, subject, message, resolved } = (req.body ?? {}) as {

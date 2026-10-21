@@ -25,6 +25,12 @@ interface UseStudioStreamResult {
   backpressureWarning: boolean;
 }
 
+/** Best-effort: a report must never disturb the stream it's describing. */
+function reportDrop(message: string, resolved: boolean): void {
+  void api.reportStudioAlert({ kind: 'studio_dropped', subject: 'studio', message, resolved })
+    .catch(() => { /* telemetry must never disturb a live stream */ });
+}
+
 export function useStudioStream({
   compositeVideoStream,
   mixedAudioStream,
@@ -61,6 +67,16 @@ export function useStudioStream({
   // Latest "stay live" intent, read at reconnect time so flipping it takes effect immediately.
   const keepReconnectingRef = useRef(keepReconnecting);
   keepReconnectingRef.current = keepReconnecting;
+
+  // Identifies this page to the server, so a reconnect after our own socket dies replaces it at once
+  // instead of being rejected as a second tab. New per page load: a reloaded tab has lost its
+  // camera/slides and must still go through the deliberate-reopen path.
+  const sessionIdRef = useRef(
+    typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+  );
+
+  // An unexpected drop in progress: when it started and the attempts since that never connected.
+  const dropRef = useRef<{ at: number; failedAttempts: string[] } | null>(null);
 
   // Breaks the openSocket <-> scheduleReconnect dependency cycle.
   const openSocketRef = useRef<() => void>(() => {});
@@ -129,11 +145,15 @@ export function useStudioStream({
     const combinedStream = new MediaStream(tracks);
 
     const token = getAuthToken();
-    const ws = new WebSocket(`${wsUrl('/ws/studio')}?token=${token}`);
+    const ws = new WebSocket(
+      `${wsUrl('/ws/studio')}?token=${token}&session=${encodeURIComponent(sessionIdRef.current)}`,
+    );
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
+    let opened = false;
 
     ws.onopen = () => {
+      opened = true;
       reconnectAttemptsRef.current = 0; // a successful connect resets the backoff
 
       let mimeType = 'video/webm;codecs=vp8,opus';
@@ -171,6 +191,19 @@ export function useStudioStream({
           if (!producedData) {
             producedData = true;
             window.clearTimeout(stallTimer);
+            // Recovered from a drop: report only once video is actually flowing again, so a socket
+            // that opens and dies at once isn't mistaken for a recovery.
+            const drop = dropRef.current;
+            if (drop) {
+              dropRef.current = null;
+              const failed = drop.failedAttempts.length
+                ? `; ${drop.failedAttempts.length} attempt(s) never connected (${drop.failedAttempts.join(', ')})`
+                : '';
+              reportDrop(
+                `Studio reconnected after ${((Date.now() - drop.at) / 1000).toFixed(1)}s${failed}.`,
+                true,
+              );
+            }
           }
           if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
         }
@@ -217,8 +250,28 @@ export function useStudioStream({
     };
 
     ws.onclose = (e) => {
+      // A late close from a socket we've already replaced must not tear down its successor — e.g.
+      // the server's 4004 to our own old socket after a same-page takeover.
+      if (wsRef.current && wsRef.current !== ws) return;
       teardownSocket();
       wsRef.current = null;
+
+      // Tell the server what the BROWSER saw. The server only sees its own end of the socket, and
+      // on 2026-10-14 that left two drops unexplained. An HTTP report can get through even when the
+      // socket can't, as the page's regular polling did throughout those drops.
+      if (shouldReconnectRef.current && e.code !== 1000) {
+        const what = `code ${e.code}${e.reason ? ` "${e.reason}"` : ''}${e.wasClean ? '' : ', unclean'}`;
+        if (opened) {
+          if (!dropRef.current) dropRef.current = { at: Date.now(), failedAttempts: [] };
+          reportDrop(
+            `Studio connection dropped (${what}) — ${Math.round(ws.bufferedAmount / 1024)} KB was still ` +
+            'queued in the browser. Reconnecting.',
+            false,
+          );
+        } else if (dropRef.current && dropRef.current.failedAttempts.length < 20) {
+          dropRef.current.failedAttempts.push(what);
+        }
+      }
 
       // Don't reconnect on codes that mean another owner holds the slot (see isFatalCloseCode).
       // Notably 4000 is retryable while live — it may be our own stale socket, and the next attempt
@@ -261,6 +314,7 @@ export function useStudioStream({
     shouldReconnectRef.current = true;
     fatalRef.current = false;
     reconnectAttemptsRef.current = 0;
+    dropRef.current = null;
     setError(null);
     openSocket();
   }, [openSocket]);

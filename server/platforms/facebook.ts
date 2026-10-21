@@ -152,6 +152,14 @@ export async function getFacebookIngestHealth(liveVideoId: string): Promise<Face
   const streams = data.ingest_streams ?? [];
   // Prefer the stream FB has designated master; with no backup stream configured there's just one.
   const health = (streams.find((s) => s.is_master) ?? streams[0])?.stream_health;
+
+  // No stream_health at all is NOT "receiving nothing": on 2026-10-21 Facebook returned an ingest
+  // stream with no stream_health while it was recording our video, we read that as "not receiving",
+  // and the leg restart that followed ended the broadcast. An ingest stream with no reading is
+  // unknown, so nothing acts on it; no ingest stream at all, or a reading of zero, still counts as bad.
+  if (streams.length > 0 && !health) {
+    return unknown('Facebook returned an ingest stream without stream_health');
+  }
   const num = (v: number | undefined): number | null =>
     typeof v === 'number' && Number.isFinite(v) ? v : null;
   const kbps = (v: number | undefined): number | null => {

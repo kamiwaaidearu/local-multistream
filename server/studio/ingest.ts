@@ -22,6 +22,9 @@ try {
 
 let studioConnected = false;
 let activeWs: WebSocket | null = null;
+// The studio page's own id for the active socket (random per page load, sent as ?session=). A
+// reconnect carrying the same id is that page recovering from its own dead socket, not a second tab.
+let activeSessionId: string | null = null;
 // When the active session last sent a media chunk. Used to tell a live session from a dead one
 // (a crashed/closed tab whose socket hasn't closed yet) so a reconnecting operator can take over
 // a stale session without hijacking a healthy one.
@@ -222,13 +225,15 @@ function startIngestFfmpeg(): ChildProcess {
   return child;
 }
 
-function handleConnection(ws: WebSocket): void {
+function handleConnection(ws: WebSocket, sessionId: string | null): void {
+  const sameOperator = sessionId !== null && sessionId === activeSessionId;
   const decision = decideStudioConnection({
     hasActiveSession: activeWs !== null,
     sessionIdleMs: Date.now() - activeWsLastDataAt,
     staleMs: STALE_SESSION_MS,
     // Only consulted when there's no studio session; an active session's own ingest publishes RTMP.
     obsPublishing: isRtmpPublishing(),
+    sameOperator,
   });
 
   if (decision === 'reject-active') {
@@ -246,7 +251,9 @@ function handleConnection(ws: WebSocket): void {
     // after a crash/reload whose socket hasn't closed yet. Replace it: detach so the old socket's
     // close handler is a no-op, close it (4004 → the client treats it as fatal, won't fight back),
     // and stop its ingest so we don't end up with two publishers on the RTMP key.
-    console.log('[studio] Taking over a stale studio session (assumed dead)');
+    console.log(sameOperator
+      ? '[studio] Same studio page reconnecting — replacing its old socket'
+      : '[studio] Taking over a stale studio session (assumed dead)');
     const old = activeWs;
     activeWs = null;
     try { old?.close(4004, 'Replaced by a new studio session'); } catch { /* ignore */ }
@@ -262,6 +269,7 @@ function handleConnection(ws: WebSocket): void {
 
   console.log('[studio] WebSocket connected');
   activeWs = ws;
+  activeSessionId = sessionId;
   studioConnected = true;
   activeWsLastDataAt = Date.now(); // grace: treat the fresh session as active from now
 
@@ -291,6 +299,7 @@ function handleConnection(ws: WebSocket): void {
   // effect rather than the cause. These counters name the cause.
   let bytesIn = 0;
   let chunksIn = 0;
+  let lastChunkAt = 0;
   let loggedFirstChunk = false;
 
   // If nothing arrives shortly after connecting, the fault is browser-side (no composite frames, a
@@ -317,6 +326,7 @@ function handleConnection(ws: WebSocket): void {
   ws.on('message', (data: Buffer) => {
     // Binary WebSocket messages are webm chunks — pipe directly to FFmpeg stdin
     if (activeWs === ws) activeWsLastDataAt = Date.now(); // liveness for takeover staleness checks
+    lastChunkAt = Date.now();
     bytesIn += data.length;
     chunksIn++;
     if (!loggedFirstChunk) {
@@ -333,13 +343,22 @@ function handleConnection(ws: WebSocket): void {
     }
   });
 
-  ws.on('close', () => {
-    console.log(`[studio] WebSocket disconnected after ${chunksIn} chunks / ${(bytesIn / 1024 / 1024).toFixed(1)} MB of webm`);
+  ws.on('close', (code: number, reason: Buffer) => {
+    // The close code is the only clue to WHO ended the socket: 1006 = dropped with no close frame
+    // (network/proxy), 1000/1001 = the page closed it, 4xxx = we did. The 2026-10-14 drops couldn't
+    // be explained afterwards because this was never logged.
+    const why = reason.length ? ` "${reason.toString().slice(0, 120)}"` : '';
+    const lastChunk = lastChunkAt ? `; last chunk ${((Date.now() - lastChunkAt) / 1000).toFixed(1)}s ago` : '';
+    console.log(
+      `[studio] WebSocket disconnected (code ${code}${why}) after ${chunksIn} chunks / ` +
+      `${(bytesIn / 1024 / 1024).toFixed(1)} MB of webm${lastChunk}`,
+    );
     clearInterval(heartbeat);
     clearTimeout(noDataTimer);
     clearInterval(throughputTimer);
     if (activeWs === ws) {
       activeWs = null;
+      activeSessionId = null;
       stopIngestFfmpeg();
     }
   });
@@ -351,6 +370,7 @@ function handleConnection(ws: WebSocket): void {
     clearInterval(throughputTimer);
     if (activeWs === ws) {
       activeWs = null;
+      activeSessionId = null;
       stopIngestFfmpeg();
     }
   });
@@ -383,7 +403,8 @@ export function initStudioWebSocket(...servers: HttpServer[]): void {
         if (url.pathname === '/ws/bandwidth') {
           handleBandwidthProbe(ws, { isBusy: () => studioConnected || isRtmpPublishing() });
         } else {
-          handleConnection(ws);
+          // Bounded so a crafted value can't bloat the log; the client sends a short random id.
+          handleConnection(ws, url.searchParams.get('session')?.slice(0, 64) || null);
         }
       });
     });

@@ -216,7 +216,12 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
 
     // Only log genuine transitions — a 20s poll would otherwise write thousands of rows per stream.
     if (decision.state !== previous && decision.state !== 'unknown') {
-      const bitrate = health.videoKbps !== null ? ` (${health.videoKbps} kbps)` : '';
+      // Our own push rate alongside theirs: "they see nothing, we send 4000 kbps" is a different
+      // fault from "they see nothing, we send nothing".
+      const pushing = health.pushKbps !== null ? `; we're sending ${health.pushKbps} kbps` : '';
+      const bitrate = health.videoKbps !== null || pushing
+        ? ` (${health.videoKbps !== null ? `${health.videoKbps} kbps` : 'no reading'}${pushing})`
+        : '';
       logEvent(streamId, platform, `health_${decision.state}`, `${decision.reason}${bitrate}`);
       console.warn(`[health] ${platform}: ${decision.state} — ${decision.reason}${bitrate}`);
     }

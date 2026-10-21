@@ -14,6 +14,17 @@ export function isRtmpPublishing(): boolean {
   return rtmpPublishing;
 }
 
+const publisherGoneListeners: Array<() => void> = [];
+
+/**
+ * Run `listener` the moment the local publisher stops — synchronously, from node-media-server's
+ * donePublish, which fires BEFORE it notifies the players (the fan-out legs) that the stream ended.
+ * The fan-out uses that window to drop its legs before they can end the platforms' broadcasts.
+ */
+export function onPublisherGone(listener: () => void): void {
+  publisherGoneListeners.push(listener);
+}
+
 export function startRtmpServer(): void {
   const nmsConfig = {
     logType: 1, // 0: none, 1: error, 2: debug, 3: ffdebug
@@ -48,6 +59,9 @@ export function startRtmpServer(): void {
     if (streamPath === expectedPath) {
       rtmpPublishing = false;
       console.log('[rtmp] Publisher disconnected');
+      for (const listener of publisherGoneListeners) {
+        try { listener(); } catch (err) { console.error('[rtmp] publisher-gone listener failed:', err); }
+      }
     }
   });
 

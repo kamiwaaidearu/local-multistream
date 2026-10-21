@@ -1,7 +1,8 @@
 import { spawn, ChildProcess } from 'child_process';
 import { getDb } from '../db/index.js';
 import { config } from '../config.js';
-import { isRtmpPublishing } from '../rtmp/server.js';
+import { isRtmpPublishing, onPublisherGone } from '../rtmp/server.js';
+import { sendAlert } from '../alerts.js';
 import { decideFanoutRetry, MAX_PLATFORM_RETRIES } from './retryPolicy.js';
 import { decideLegEncoding, buildLegArgs, describeLegEncoding } from './platformEncoding.js';
 import { activeEncoder } from '../studio/ingest.js';
@@ -27,7 +28,13 @@ interface ActiveProcess {
   stopping: boolean; // set when we intentionally stop it, so 'close' doesn't trigger a retry
   /** Parsed bitrate/fps/speed for this leg, throttled for logging and readable for the UI. */
   progress: ProgressTracker;
+  /** Last few non-progress stderr lines — FFmpeg's actual reason when a leg dies. */
+  stderrTail: string[];
+  /** Set when WE killed it because the source dropped, so its exit isn't reported as a fault. */
+  droppedForSourceLoss: boolean;
 }
+
+const STDERR_TAIL_LINES = 12;
 
 /** How often to log a parsed per-leg push-rate summary. */
 const LEG_PROGRESS_LOG_MS = 60_000;
@@ -104,6 +111,8 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
     startedAt: Date.now(),
     stopping: false,
     progress: new ProgressTracker(LEG_PROGRESS_LOG_MS),
+    stderrTail: [],
+    droppedForSourceLoss: false,
   };
 
   activeProcesses.set(key, proc);
@@ -116,6 +125,11 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
       const summary = proc.progress.update(line);
       if (summary) console.log(`[ffmpeg] ${ps.platform} pushing at ${summary}`);
       pushSSEEvent({ type: 'ffmpeg_status', platform: ps.platform, data: line });
+    } else if (line) {
+      // Keep the rest: when a leg dies, its last words are the only record of why. On 2026-10-14
+      // Facebook refused three reconnects and nothing said what it objected to.
+      proc.stderrTail.push(...line.split(/\r?\n|\r/).filter(Boolean));
+      if (proc.stderrTail.length > STDERR_TAIL_LINES) proc.stderrTail.splice(0, proc.stderrTail.length - STDERR_TAIL_LINES);
     }
   });
 
@@ -141,7 +155,15 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
     // input EOF, so code 0 is NOT "all done" here.
     const ranMs = Date.now() - proc.startedAt;
     const sourcePresent = isRtmpPublishing();
-    console.warn(`[ffmpeg] ${ps.platform} exited (code ${code}) while stream is live — reconnecting`);
+    if (proc.droppedForSourceLoss) {
+      console.warn(`[ffmpeg] ${ps.platform} dropped (source lost) — will reconnect when it returns`);
+    } else {
+      console.warn(`[ffmpeg] ${ps.platform} exited (code ${code}) while stream is live — reconnecting`);
+      // Skip the source-absent probes during an outage: their "no input" errors are expected noise.
+      if (sourcePresent || ranMs > 15000) {
+        for (const l of proc.stderrTail) console.warn(`[ffmpeg] ${ps.platform} stderr: ${l}`);
+      }
+    }
     // Persist a disconnect for a leg that had actually been streaming (a real drop) OR any failure
     // while the source is present (a per-platform fault worth a paper trail). Suppress only the
     // rapid source-absent reconnect probes during an outage, which would otherwise flood the log.
@@ -154,11 +176,14 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
     const decision = decideFanoutRetry({ sourcePresent, retryCount, ranMs });
 
     if (decision.giveUp) {
+      const lastError = proc.stderrTail.at(-1) ?? 'no error output';
       db.prepare("UPDATE platform_streams SET status = 'error', error_message = ? WHERE id = ?").run(
-        `FFmpeg failed ${MAX_PLATFORM_RETRIES} times while the source was live — gave up`, ps.id,
+        `FFmpeg failed ${MAX_PLATFORM_RETRIES} times while the source was live — gave up (${lastError})`, ps.id,
       );
-      logEvent(streamId, ps.platform, 'ffmpeg_gave_up');
+      logEvent(streamId, ps.platform, 'ffmpeg_gave_up', lastError);
       pushSSEEvent({ type: 'ffmpeg_gave_up', platform: ps.platform });
+      // Nobody saw Facebook go dark on 2026-10-14 until the broadcast was over.
+      sendAlert('health_alarm', ps.platform, `Stopped sending video after ${MAX_PLATFORM_RETRIES} failed reconnects: ${lastError}`);
       return;
     }
 
@@ -185,6 +210,31 @@ function spawnFfmpeg(streamId: string, ps: PlatformStream, retryCount: number): 
   logEvent(streamId, ps.platform, 'ffmpeg_started');
   pushSSEEvent({ type: 'ffmpeg_started', platform: ps.platform });
 }
+
+/**
+ * The local source just stopped publishing (studio socket dropped, ingest died, or OBS
+ * disconnected). Kill every running leg NOW, before it notices.
+ *
+ * Left alone, each leg reads EOF, exits cleanly, and on the way out sends the platform an explicit
+ * RTMP unpublish: "this broadcast is over". Facebook takes that at its word. On 2026-10-14 it restarted
+ * the broadcast after the first drop (throwing away the first 12 minutes of the saved video) and
+ * closed it for good after the second, refusing every reconnect. A hard kill sends no unpublish, so
+ * to the platform it looks like a network blip, which is what its reconnect grace is for. The normal
+ * close handler then retries each leg until the source returns.
+ *
+ * This runs inside node-media-server's donePublish event, which fires before it tells the legs the
+ * stream ended, so the kill lands first. An intentional end goes through stopFanOut, which takes the
+ * legs out of activeProcesses before the source stops, so it still ends them cleanly.
+ */
+function dropLegsForSourceLoss(): void {
+  for (const proc of activeProcesses.values()) {
+    if (proc.stopping || proc.droppedForSourceLoss) continue;
+    proc.droppedForSourceLoss = true;
+    try { proc.child.kill('SIGKILL'); } catch { /* already gone */ }
+  }
+}
+
+onPublisherGone(dropLegsForSourceLoss);
 
 /**
  * Start FFmpeg fan-out for all created platform streams.
@@ -233,6 +283,11 @@ export function legPushKbps(streamId: string, platform: string): number | null {
  * Distinct from ensurePlatformLeg, which is a no-op when the leg is already running: here the
  * running process is precisely the problem. Marked `stopping` first so the normal close handler
  * treats the kill as intentional and doesn't race its own retry against our respawn.
+ *
+ * Hard kill, never a graceful 'q': a graceful quit sends the platform an RTMP unpublish, and
+ * Facebook ends the live video for good on that. On 2026-10-21 a restart did exactly that to a
+ * Facebook broadcast that WAS receiving, and every reconnect after it was refused. See
+ * dropLegsForSourceLoss.
  */
 export function restartPlatformLeg(streamId: string, ps: PlatformStream): void {
   const key = `${streamId}:${ps.platform}`;
@@ -241,9 +296,7 @@ export function restartPlatformLeg(streamId: string, ps: PlatformStream): void {
   if (existing) {
     existing.stopping = true;
     activeProcesses.delete(key);
-    try { existing.child.stdin?.write('q\n'); } catch { /* ignore */ }
-    // Don't wait on a graceful quit — this leg is already misbehaving.
-    setTimeout(() => { try { existing.child.kill(); } catch { /* already gone */ } }, 2000);
+    try { existing.child.kill('SIGKILL'); } catch { /* already gone */ }
   }
 
   logEvent(streamId, ps.platform, 'leg_restarted', 'Platform reported it was not receiving video');

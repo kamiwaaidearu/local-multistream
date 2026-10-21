@@ -36,6 +36,20 @@ test('takes over a stale (presumed-dead) session', () => {
   );
 });
 
+test('the same page reconnecting takes over at once, even while its old socket still looks healthy', () => {
+  assert.equal(
+    decideStudioConnection({ hasActiveSession: true, sessionIdleMs: 500, staleMs: STALE, obsPublishing: false, sameOperator: true }),
+    'takeover',
+  );
+});
+
+test('a different page is still rejected while the active session is healthy', () => {
+  assert.equal(
+    decideStudioConnection({ hasActiveSession: true, sessionIdleMs: 500, staleMs: STALE, obsPublishing: false, sameOperator: false }),
+    'reject-active',
+  );
+});
+
 test('an active session is judged by liveness, not by OBS — obsPublishing is ignored when a session exists', () => {
   // A live studio session's own ingest publishes RTMP, so obsPublishing would be true; it must not
   // be read as OBS while a session is attached.
