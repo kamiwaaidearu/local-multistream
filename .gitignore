@@ -41,3 +41,7 @@ Thumbs.db
 # checkout must have it or every default template renders on flat blue.
 !uploads/thumbnails/
 !uploads/thumbnails/recommit-to-christ.jpg
+
+# Claude Code per-machine settings and session worktrees
+.claude/settings.local.json
+.claude/worktrees/
