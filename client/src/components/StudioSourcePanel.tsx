@@ -23,6 +23,8 @@ import { useStudioStream } from '../hooks/useStudioStream';
 import { measureUploadMbps, MIN_VIABLE_MBPS, QUALITY_PRESETS, recommendQuality, DEFAULT_QUALITY, type QualityKey } from '../lib/bandwidthProbe';
 import { FALLBACK_TEMPLATE } from '../lib/gridTemplate';
 import { TemplateEditor } from './TemplateEditor';
+import { AudioTestCard } from './AudioTestCard';
+import { createSilenceTracker, LIVE_SILENCE_ALERT_MS } from '../lib/audioCheck';
 import { api } from '../lib/api';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -51,9 +53,11 @@ interface StudioSourcePanelProps {
    * broadcast is irreversible whereas disconnecting an idle studio is not.
    */
   streamIsLive?: boolean;
+  /** Whether the presenter has passed the audio test with a source that is still in the mix. */
+  onAudioConfirmedChange?: (confirmed: boolean) => void;
 }
 
-export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection, streamIsLive }: StudioSourcePanelProps) {
+export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection, streamIsLive, onAudioConfirmedChange }: StudioSourcePanelProps) {
   const [template, setTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
   const [savedTemplate, setSavedTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
 
@@ -156,7 +160,13 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
 
   // Audio mixer — N independent sources (mics, desktop audio, slide audio), each with its own
   // volume / mute / meter, summed into one track for the encoder.
-  const { mixedStream, sources, levels, addSource, removeSource, setGain, setMuted, resume, ensureRunning } = useAudioMixer();
+  const { mixedStream, sources, levels, mixLevel, addSource, removeSource, setGain, setMuted, resume, ensureRunning } = useAudioMixer();
+
+  const [audioConfirmed, setAudioConfirmed] = useState(false);
+  const handleAudioConfirmed = useCallback((ok: boolean) => {
+    setAudioConfirmed(ok);
+    onAudioConfirmedChange?.(ok);
+  }, [onAudioConfirmedChange]);
 
   // Track the slide-audio source so we can drop it from the mix when the screen share stops.
   const slideSourceIdRef = useRef<string | null>(null);
@@ -318,6 +328,41 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   }, [studioStatus, onStatusChange]);
 
   const live = studioStatus === 'connected' || studioStatus === 'connecting';
+
+  // Live silence watch. The platforms cannot tell a silent mix from a real one — a silent AAC track
+  // still has a bitrate — so a mic that dies quietly mid-broadcast (or was never added) is visible only
+  // here. After a minute of digital silence on air, warn the presenter and report it so it reaches the
+  // event log and the alert webhook.
+  const [airSilent, setAirSilent] = useState(false);
+  const watchingSilence = !!streamIsLive && studioStatus === 'connected';
+  // Read through a ref on a timer: a mix stuck at exactly 0 never changes state, so an effect keyed on
+  // the level itself would stop running at the very moment it needs to keep counting.
+  const mixLevelRef = useRef(mixLevel);
+  mixLevelRef.current = mixLevel;
+  useEffect(() => {
+    if (!watchingSilence) {
+      setAirSilent(false);
+      return;
+    }
+    const tracker = createSilenceTracker();
+    let reportedSilent = false;
+    const id = window.setInterval(() => {
+      const silentMs = tracker.update(mixLevelRef.current, Date.now());
+      const silentNow = silentMs >= LIVE_SILENCE_ALERT_MS;
+      if (silentNow === reportedSilent) return;
+      reportedSilent = silentNow;
+      setAirSilent(silentNow);
+      void api.reportStudioAlert({
+        kind: 'audio_silent',
+        subject: 'Studio audio',
+        message: silentNow
+          ? `The studio mix has been silent for ${Math.round(silentMs / 1000)}s while live — viewers can't hear anything.`
+          : 'Studio audio is back.',
+        resolved: !silentNow,
+      }).catch(() => { /* never disturb a live stream */ });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [watchingSilence]);
 
   // Measure upload bandwidth to the server and pre-select a quality the connection can sustain.
   // `silent` is used by the auto-run on arrival: it sets the default quietly (the inline "Measured
@@ -489,6 +534,15 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
         </Alert>
       )}
 
+      {airSilent && (
+        <Alert color="red" title="Viewers can’t hear anything">
+          <Text size="sm">
+            No sound has gone out for over a minute. Check that your microphone is plugged in and not
+            muted, or add it again under Audio below.
+          </Text>
+        </Alert>
+      )}
+
       {/* Live preview — exactly what viewers will see */}
       <Card withBorder padding={0} style={{ overflow: 'hidden' }}>
         <canvas
@@ -609,10 +663,10 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
           <ThemeIcon
             radius="xl"
             size="md"
-            color={sources.length > 0 ? 'green' : 'gray'}
-            variant={sources.length > 0 ? 'filled' : 'light'}
+            color={audioConfirmed ? 'green' : 'gray'}
+            variant={audioConfirmed ? 'filled' : 'light'}
           >
-            {sources.length > 0 ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>3</Text>}
+            {audioConfirmed ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>3</Text>}
           </ThemeIcon>
           <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
             <Group justify="space-between" wrap="nowrap" gap="xs">
@@ -697,6 +751,16 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
               Desktop audio: pick a screen or tab in the share dialog and tick “Share system/tab audio”.
               We only use the sound, not the picture.
             </Text>
+
+            <AudioTestCard
+              mixedStream={mixedStream}
+              mixLevel={mixLevel}
+              levels={levels}
+              sources={sources}
+              ensureRunning={ensureRunning}
+              onConfirmedChange={handleAudioConfirmed}
+              streamIsLive={!!streamIsLive}
+            />
           </Stack>
         </Group>
       </Card>

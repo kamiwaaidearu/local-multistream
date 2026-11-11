@@ -192,11 +192,18 @@ export const api = {
   // Report a problem only the browser can see (congested uplink, dead camera/mic track) so it reaches
   // the log and the alert webhook instead of only a banner in the presenter's own tab.
   reportStudioAlert: (body: {
-    kind: 'uplink_congested' | 'track_ended' | 'studio_dropped';
+    kind: 'uplink_congested' | 'track_ended' | 'studio_dropped' | 'audio_silent';
     subject: string;
     message: string;
     resolved?: boolean;
   }) => request<{ ok: boolean }>('/api/studio/alert', { method: 'POST', body: JSON.stringify(body) }),
+  // Record a pre-live audio test, so "did the presenter check their mic?" is answerable afterwards.
+  reportStudioAudioCheck: (body: {
+    outcome: 'heard' | 'silent' | 'confirmed' | 'confirmed_override';
+    peak: number;
+    soundMs: number;
+    sources: string[];
+  }) => request<{ ok: boolean }>('/api/studio/audio-check', { method: 'POST', body: JSON.stringify(body) }),
   // Retry one platform mid-broadcast after reconnecting its auth (leaves the stream live).
   retryPlatformLive: (id: string, platform: string) =>
     request<unknown>(`/api/streams/${id}/live/${platform}/retry`, { method: 'POST' }),

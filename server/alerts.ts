@@ -21,7 +21,8 @@ export type AlertKey =
   | 'ingest_unconfirmed'
   | 'auth_broken'
   | 'uplink_congested'
-  | 'studio_dropped';
+  | 'studio_dropped'
+  | 'audio_silent';
 
 /** Don't re-send the same alert key more often than this. A stuck condition is polled every 20s; the
  *  operator needs to be told once, not eighty times. */

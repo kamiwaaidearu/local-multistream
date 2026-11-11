@@ -125,6 +125,35 @@ studioRouter.post('/quality', (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+// --- Pre-live audio test ---
+
+/**
+ * Record the outcome of the studio's "Test audio" check. Go-live in the studio waits for the presenter
+ * to confirm they heard themselves; this puts that check (and whether the meter actually heard sound,
+ * or the presenter overrode it) in the event log next to the broadcast.
+ */
+const AUDIO_CHECK_OUTCOMES = new Set(['heard', 'silent', 'confirmed', 'confirmed_override']);
+
+studioRouter.post('/audio-check', (req: Request, res: Response) => {
+  const { outcome, peak, soundMs, sources } = (req.body ?? {}) as {
+    outcome?: string; peak?: number; soundMs?: number; sources?: unknown;
+  };
+  if (!outcome || !AUDIO_CHECK_OUTCOMES.has(outcome)) {
+    res.status(400).json({ error: 'Unknown outcome' });
+    return;
+  }
+  const names = Array.isArray(sources) ? sources.map((s) => String(s).slice(0, 60)).slice(0, 8).join(', ') : '';
+  const dbfs = typeof peak === 'number' && peak > 0 ? `${(20 * Math.log10(peak)).toFixed(0)} dBFS peak` : 'no signal';
+  const detail = `Audio test ${outcome.replace('_', ' ')}: ${names || 'no sources'} · ${dbfs} · ${typeof soundMs === 'number' ? soundMs : 0} ms of sound`;
+
+  if (outcome === 'silent' || outcome === 'confirmed_override') console.warn(`[studio] ${detail}`);
+  else console.log(`[studio] ${detail}`);
+  getDb().prepare('INSERT INTO event_log (stream_id, platform, event, detail, ts) VALUES (?, ?, ?, ?, ?)')
+    .run(null, null, 'studio_audio_check', detail, Date.now());
+
+  res.json({ ok: true });
+});
+
 // --- Studio-side problem reports ---
 
 /**
@@ -140,6 +169,9 @@ const STUDIO_ALERT_KINDS = {
   track_ended: 'track_ended',
   // The browser's view of a studio socket drop (close code, queued bytes) and of its recovery.
   studio_dropped: 'studio_dropped',
+  // The on-air mix has been digitally silent while live. Platforms cannot see this: a silent AAC track
+  // still has a bitrate, so the platform-side audio_missing alarm stays quiet (the 2026-10-14 case).
+  audio_silent: 'audio_silent',
 } as const;
 
 studioRouter.post('/alert', async (req: Request, res: Response) => {

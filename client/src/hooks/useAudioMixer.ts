@@ -39,6 +39,12 @@ interface UseAudioMixerResult {
   sources: AudioSource[];
   /** Per-source RMS levels (0..1), keyed by source id, refreshed ~10×/s for metering. */
   levels: Record<string, number>;
+  /**
+   * RMS of the summed mix (float samples, so it resolves down to true digital silence), refreshed with
+   * `levels`. This is what goes to air, after per-source gain and mute — the signal the audio test and
+   * the live silence watch judge.
+   */
+  mixLevel: number;
   addSource: (input: AddAudioSourceInput) => string | null;
   removeSource: (id: string) => void;
   setGain: (id: string, value: number) => void;
@@ -65,13 +71,14 @@ interface UseAudioMixerResult {
  */
 export function useAudioMixer(): UseAudioMixerResult {
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const destinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const nodesRef = useRef<Map<string, InternalNode>>(new Map());
+  const busRef = useRef<GainNode | null>(null);
   const levelIntervalRef = useRef<number>(0);
 
   const [mixedStream, setMixedStream] = useState<MediaStream | null>(null);
   const [sources, setSources] = useState<AudioSource[]>([]);
   const [levels, setLevels] = useState<Record<string, number>>({});
+  const [mixLevel, setMixLevel] = useState(0);
 
   // Create the context + mix bus once. Every source fans into this one destination.
   useEffect(() => {
@@ -79,7 +86,18 @@ export function useAudioMixer(): UseAudioMixerResult {
     audioCtxRef.current = ctx;
 
     const destination = ctx.createMediaStreamDestination();
-    destinationRef.current = destination;
+
+    // Every source sums into this bus, which feeds both the encoder (destination) and a mix meter.
+    // A MediaStreamAudioDestinationNode has no output to tap, so the bus is the only place the on-air
+    // signal can be measured.
+    const bus = ctx.createGain();
+    bus.gain.value = 1;
+    bus.connect(destination);
+    const mixAnalyser = ctx.createAnalyser();
+    mixAnalyser.fftSize = 2048;
+    bus.connect(mixAnalyser);
+    busRef.current = bus;
+    const mixData = new Float32Array(mixAnalyser.fftSize);
 
     // Keep the mix bus producing samples even with ZERO sources connected.
     //
@@ -97,7 +115,7 @@ export function useAudioMixer(): UseAudioMixerResult {
     // otherwise leave the bus input-less and stall the entire stream, not merely mute it.
     const keepalive = ctx.createConstantSource();
     keepalive.offset.value = 0;
-    keepalive.connect(destination);
+    keepalive.connect(bus);
     keepalive.start();
 
     setMixedStream(destination.stream);
@@ -115,6 +133,11 @@ export function useAudioMixer(): UseAudioMixerResult {
         next[id] = Math.sqrt(sum / node.data.length);
       });
       setLevels(next);
+
+      mixAnalyser.getFloatTimeDomainData(mixData);
+      let mixSum = 0;
+      for (let i = 0; i < mixData.length; i++) mixSum += mixData[i] * mixData[i];
+      setMixLevel(Math.sqrt(mixSum / mixData.length));
     }, 100);
 
     return () => {
@@ -128,9 +151,11 @@ export function useAudioMixer(): UseAudioMixerResult {
         node.stream.getTracks().forEach((t) => t.stop());
       });
       nodesRef.current.clear();
+      try { bus.disconnect(); } catch { /* ignore */ }
+      try { mixAnalyser.disconnect(); } catch { /* ignore */ }
+      busRef.current = null;
       void ctx.close().catch(() => {});
       audioCtxRef.current = null;
-      destinationRef.current = null;
       setMixedStream(null);
     };
   }, []);
@@ -176,8 +201,8 @@ export function useAudioMixer(): UseAudioMixerResult {
 
   const addSource = useCallback((input: AddAudioSourceInput): string | null => {
     const ctx = audioCtxRef.current;
-    const destination = destinationRef.current;
-    if (!ctx || !destination) return null;
+    const bus = busRef.current;
+    if (!ctx || !bus) return null;
     if (input.stream.getAudioTracks().length === 0) return null;
 
     const id = crypto.randomUUID();
@@ -188,7 +213,7 @@ export function useAudioMixer(): UseAudioMixerResult {
     analyser.fftSize = 256;
 
     sourceNode.connect(gainNode);
-    gainNode.connect(destination);
+    gainNode.connect(bus);
     gainNode.connect(analyser);
 
     nodesRef.current.set(id, {
@@ -248,5 +273,5 @@ export function useAudioMixer(): UseAudioMixerResult {
     setSources((prev) => prev.map((s) => (s.id === id ? { ...s, muted } : s)));
   }, []);
 
-  return { mixedStream, sources, levels, addSource, removeSource, setGain, setMuted, resume, ensureRunning };
+  return { mixedStream, sources, levels, mixLevel, addSource, removeSource, setGain, setMuted, resume, ensureRunning };
 }

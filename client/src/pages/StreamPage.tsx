@@ -125,6 +125,9 @@ export function StreamPage() {
   const [sourceConnected, setSourceConnected] = useState(false);
   const [sourceType, setSourceType] = useState<'obs' | 'studio' | null>(null);
   const [studioStatus, setStudioStatus] = useState<StudioStatus>('disconnected');
+  // Studio go-live waits until the presenter has heard their own mic played back (see AudioTestCard).
+  // Gates only the ready-phase Go Live button: nothing here can block a live broadcast or its reconnect.
+  const [studioAudioConfirmed, setStudioAudioConfirmed] = useState(false);
 
   // UI state
   const [editDrawerOpen, setEditDrawerOpen] = useState(false);
@@ -622,6 +625,7 @@ export function StreamPage() {
           onDisconnectRef={studioDisconnectRef}
           autoTestConnection={isReady}
           streamIsLive={isLive}
+          onAudioConfirmedChange={setStudioAudioConfirmed}
         />
       )}
 
@@ -654,9 +658,9 @@ export function StreamPage() {
             }
           }}
           loading={actionLoading === 'golive' || studioStatus === 'connecting'}
-          disabled={studioStatus === 'error'}
+          disabled={studioStatus === 'error' || !studioAudioConfirmed}
         >
-          Go Live
+          {studioAudioConfirmed ? 'Go Live' : 'Test your audio to go live'}
         </Button>
       )}
 
