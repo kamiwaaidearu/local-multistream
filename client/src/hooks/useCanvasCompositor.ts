@@ -7,6 +7,7 @@ import {
   getCellBounds,
   fitImageInArea,
 } from '../lib/gridTemplate';
+import { classifyVideoSource, maxLumaOf, type VideoSourceName, type VideoSourceState } from '../lib/videoCheck';
 
 export type { GridTemplate };
 
@@ -21,6 +22,8 @@ interface UseCanvasCompositorResult {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   compositeStream: MediaStream | null;
   isRendering: boolean;
+  /** What viewers would see from each video source, measured from the frames the compositor draws. */
+  videoStates: Record<VideoSourceName, VideoSourceState>;
 }
 
 export function useCanvasCompositor({
@@ -93,6 +96,46 @@ export function useCanvasCompositor({
     screenVideoRef.current.srcObject = screenStream;
     if (screenStream) screenVideoRef.current.play().catch(() => {});
   }, [screenStream]);
+
+  // Video check: twice a second, sample each source from the element the compositor draws from — so
+  // "ok" means a real, non-black picture is reaching the canvas, not merely that a device was opened.
+  const [videoStates, setVideoStates] = useState<Record<VideoSourceName, VideoSourceState>>({ camera: 'off', slides: 'off' });
+  useEffect(() => {
+    const probe = document.createElement('canvas');
+    probe.width = 64;
+    probe.height = 36;
+    const pctx = probe.getContext('2d', { willReadFrequently: true });
+
+    const sample = (video: HTMLVideoElement | null, stream: MediaStream | null, cellType: 'webcam' | 'screenShare') => {
+      const enabled = !!stream && stream.getVideoTracks().some((t) => t.readyState === 'live');
+      const inLayout = (templateRef.current.cells ?? []).some((c) => c.content.type === cellType);
+      let maxLuma: number | null = null;
+      if (enabled && video && video.readyState >= 2 && video.videoWidth > 0 && pctx) {
+        try {
+          pctx.drawImage(video, 0, 0, probe.width, probe.height);
+          maxLuma = maxLumaOf(pctx.getImageData(0, 0, probe.width, probe.height).data);
+        } catch { /* leave as not-yet-sampled */ }
+      }
+      return classifyVideoSource({
+        enabled,
+        inLayout,
+        readyState: video?.readyState ?? 0,
+        videoWidth: video?.videoWidth ?? 0,
+        maxLuma,
+      });
+    };
+
+    const tick = () => {
+      const next = {
+        camera: sample(webcamVideoRef.current, webcamStream, 'webcam'),
+        slides: sample(screenVideoRef.current, screenStream, 'screenShare'),
+      };
+      setVideoStates((prev) => (prev.camera === next.camera && prev.slides === next.slides ? prev : next));
+    };
+    tick();
+    const id = window.setInterval(tick, 500);
+    return () => window.clearInterval(id);
+  }, [webcamStream, screenStream]);
 
   // Main render loop
   useEffect(() => {
@@ -321,5 +364,5 @@ export function useCanvasCompositor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [template.width, template.height, fps, preloadImages]);
 
-  return { canvasRef, compositeStream, isRendering };
+  return { canvasRef, compositeStream, isRendering, videoStates };
 }

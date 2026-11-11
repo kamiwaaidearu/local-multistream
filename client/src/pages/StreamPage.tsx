@@ -128,6 +128,8 @@ export function StreamPage() {
   // Studio go-live waits until the presenter has heard their own mic played back (see AudioTestCard).
   // Gates only the ready-phase Go Live button: nothing here can block a live broadcast or its reconnect.
   const [studioAudioConfirmed, setStudioAudioConfirmed] = useState(false);
+  // Likewise both the camera and the slides must be showing a real picture (see videoCheck.ts).
+  const [studioVideoReady, setStudioVideoReady] = useState(false);
 
   // UI state
   const [editDrawerOpen, setEditDrawerOpen] = useState(false);
@@ -626,6 +628,7 @@ export function StreamPage() {
           autoTestConnection={isReady}
           streamIsLive={isLive}
           onAudioConfirmedChange={setStudioAudioConfirmed}
+          onVideoReadyChange={setStudioVideoReady}
         />
       )}
 
@@ -658,9 +661,13 @@ export function StreamPage() {
             }
           }}
           loading={actionLoading === 'golive' || studioStatus === 'connecting'}
-          disabled={studioStatus === 'error' || !studioAudioConfirmed}
+          disabled={studioStatus === 'error' || !studioVideoReady || !studioAudioConfirmed}
         >
-          {studioAudioConfirmed ? 'Go Live' : 'Test your audio to go live'}
+          {!studioVideoReady
+            ? 'Share slides and turn on camera to go live'
+            : !studioAudioConfirmed
+              ? 'Test your audio to go live'
+              : 'Go Live'}
         </Button>
       )}
 

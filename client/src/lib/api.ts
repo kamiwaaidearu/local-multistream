@@ -192,7 +192,7 @@ export const api = {
   // Report a problem only the browser can see (congested uplink, dead camera/mic track) so it reaches
   // the log and the alert webhook instead of only a banner in the presenter's own tab.
   reportStudioAlert: (body: {
-    kind: 'uplink_congested' | 'track_ended' | 'studio_dropped' | 'audio_silent';
+    kind: 'uplink_congested' | 'track_ended' | 'studio_dropped' | 'audio_silent' | 'video_missing';
     subject: string;
     message: string;
     resolved?: boolean;

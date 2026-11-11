@@ -25,6 +25,7 @@ import { FALLBACK_TEMPLATE } from '../lib/gridTemplate';
 import { TemplateEditor } from './TemplateEditor';
 import { AudioTestCard } from './AudioTestCard';
 import { createSilenceTracker, LIVE_SILENCE_ALERT_MS } from '../lib/audioCheck';
+import { describeVideoState, isVideoReady, LIVE_VIDEO_ALERT_MS } from '../lib/videoCheck';
 import { api } from '../lib/api';
 
 type StudioStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
@@ -55,9 +56,11 @@ interface StudioSourcePanelProps {
   streamIsLive?: boolean;
   /** Whether the presenter has passed the audio test with a source that is still in the mix. */
   onAudioConfirmedChange?: (confirmed: boolean) => void;
+  /** Whether both the camera and the slides are showing a real picture in the layout. */
+  onVideoReadyChange?: (ready: boolean) => void;
 }
 
-export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection, streamIsLive, onAudioConfirmedChange }: StudioSourcePanelProps) {
+export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRef, autoTestConnection, streamIsLive, onAudioConfirmedChange, onVideoReadyChange }: StudioSourcePanelProps) {
   const [template, setTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
   const [savedTemplate, setSavedTemplate] = useState<GridTemplate>(FALLBACK_TEMPLATE);
 
@@ -152,11 +155,20 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
   });
 
   // Compositor draws whatever camera stream we hand it — raw or blurred.
-  const { canvasRef, compositeStream } = useCanvasCompositor({
+  const { canvasRef, compositeStream, videoStates } = useCanvasCompositor({
     template,
     webcamStream: cameraStream,
     screenStream,
   });
+
+  const videoReady = isVideoReady(videoStates);
+  useEffect(() => { onVideoReadyChange?.(videoReady); }, [videoReady, onVideoReadyChange]);
+  const videoProblems = [
+    describeVideoState('Your slides', videoStates.slides),
+    describeVideoState('Your camera', videoStates.camera),
+    videoStates.slides === 'off' ? 'Share your slides (step 1).' : null,
+    videoStates.camera === 'off' ? 'Turn on your camera (step 2).' : null,
+  ].filter((m): m is string => m !== null);
 
   // Audio mixer — N independent sources (mics, desktop audio, slide audio), each with its own
   // volume / mute / meter, summed into one track for the encoder.
@@ -364,6 +376,41 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
     return () => window.clearInterval(id);
   }, [watchingSilence]);
 
+  // Live video watch: same reasoning as silence. An empty or black picture still encodes at full
+  // bitrate and looks healthy to every platform, so only this tab can notice it.
+  const videoReadyRef = useRef(videoReady);
+  videoReadyRef.current = videoReady;
+  const videoStatesRef = useRef(videoStates);
+  videoStatesRef.current = videoStates;
+  const [videoMissing, setVideoMissing] = useState(false);
+  useEffect(() => {
+    if (!watchingSilence) {
+      setVideoMissing(false);
+      return;
+    }
+    let badSince: number | null = null;
+    let reported = false;
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      if (videoReadyRef.current) badSince = null;
+      else if (badSince === null) badSince = now;
+      const missing = badSince !== null && now - badSince >= LIVE_VIDEO_ALERT_MS;
+      if (missing === reported) return;
+      reported = missing;
+      setVideoMissing(missing);
+      const st = videoStatesRef.current;
+      void api.reportStudioAlert({
+        kind: 'video_missing',
+        subject: 'Studio video',
+        message: missing
+          ? `Video has been missing for ${LIVE_VIDEO_ALERT_MS / 1000}s while live (camera: ${st.camera}, slides: ${st.slides}).`
+          : 'Studio camera and slides are back.',
+        resolved: !missing,
+      }).catch(() => { /* never disturb a live stream */ });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [watchingSilence]);
+
   // Measure upload bandwidth to the server and pre-select a quality the connection can sustain.
   // `silent` is used by the auto-run on arrival: it sets the default quietly (the inline "Measured
   // upload …" line still shows the result) and swallows failures, since a red toast on every page
@@ -534,6 +581,14 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
         </Alert>
       )}
 
+      {videoMissing && (
+        <Alert color="red" title="Viewers can’t see your camera or slides">
+          <Stack gap={2}>
+            {videoProblems.map((m) => <Text key={m} size="sm">{m}</Text>)}
+          </Stack>
+        </Alert>
+      )}
+
       {airSilent && (
         <Alert color="red" title="Viewers can’t hear anything">
           <Text size="sm">
@@ -558,6 +613,13 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
       <Text size="xs" c="dimmed" ta="center" style={{ marginTop: -4 }}>
         Live preview — what your viewers will see
       </Text>
+      {!streamIsLive && videoProblems.length > 0 && (
+        <Alert color="orange" variant="light" p="xs">
+          <Stack gap={2}>
+            {videoProblems.map((m) => <Text key={m} size="xs">{m}</Text>)}
+          </Stack>
+        </Alert>
+      )}
 
       {/* Step 1 — Share slides */}
       <Card withBorder padding="sm">
@@ -565,10 +627,10 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
           <ThemeIcon
             radius="xl"
             size="md"
-            color={screenEnabled ? 'green' : 'gray'}
-            variant={screenEnabled ? 'filled' : 'light'}
+            color={videoStates.slides === 'ok' ? 'green' : 'gray'}
+            variant={videoStates.slides === 'ok' ? 'filled' : 'light'}
           >
-            {screenEnabled ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>1</Text>}
+            {videoStates.slides === 'ok' ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>1</Text>}
           </ThemeIcon>
           <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
             <Group justify="space-between" wrap="nowrap" gap="xs">
@@ -600,10 +662,10 @@ export function StudioSourcePanel({ onStatusChange, onConnectRef, onDisconnectRe
           <ThemeIcon
             radius="xl"
             size="md"
-            color={webcamEnabled ? 'green' : 'gray'}
-            variant={webcamEnabled ? 'filled' : 'light'}
+            color={videoStates.camera === 'ok' ? 'green' : 'gray'}
+            variant={videoStates.camera === 'ok' ? 'filled' : 'light'}
           >
-            {webcamEnabled ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>2</Text>}
+            {videoStates.camera === 'ok' ? <Text size="sm">✓</Text> : <Text size="xs" fw={700}>2</Text>}
           </ThemeIcon>
           <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
             <Group justify="space-between" wrap="nowrap" gap="xs">

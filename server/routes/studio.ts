@@ -172,6 +172,8 @@ const STUDIO_ALERT_KINDS = {
   // The on-air mix has been digitally silent while live. Platforms cannot see this: a silent AAC track
   // still has a bitrate, so the platform-side audio_missing alarm stays quiet (the 2026-10-14 case).
   audio_silent: 'audio_silent',
+  // Camera or slides missing or black while live: likewise invisible to the platforms.
+  video_missing: 'video_missing',
 } as const;
 
 studioRouter.post('/alert', async (req: Request, res: Response) => {
