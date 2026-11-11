@@ -56,11 +56,16 @@ export interface PlatformHealth {
    * the worst possible failure while being invisible to every other signal we have.
    */
   audioAlarm: boolean;
+  /** What the platform actually returned on the last probe, in words (Facebook only, for now). */
+  evidence: string | null;
   checkedAt: number;
 }
 
 interface Tracked extends HealthCounters {
   health: PlatformHealth;
+  /** The last "no usable reading" cause written to the event log, so it is logged once per change
+   *  rather than every 20s. */
+  loggedProbeError: string | null;
 }
 
 interface Monitor {
@@ -89,7 +94,12 @@ function logEvent(streamId: string, platform: string | null, event: string, deta
 
 /** Ask one platform what it's receiving. Never throws — a failed probe is reported as such so the
  *  policy can treat it as unknown rather than as a fault. */
-async function sample(ps: PlatformStream): Promise<{ sample: HealthSample; detail: Partial<PlatformHealth> }> {
+async function sample(ps: PlatformStream): Promise<{
+  sample: HealthSample;
+  detail: Partial<PlatformHealth>;
+  /** Why there was no usable reading, when the platform says. */
+  probeError?: string | null;
+}> {
   if (ps.platform === 'facebook') {
     if (!ps.broadcast_id) {
       return { sample: { receiving: false, probeFailed: true, warnings: [], audioMissing: null }, detail: {} };
@@ -106,7 +116,8 @@ async function sample(ps: PlatformStream): Promise<{ sample: HealthSample; detai
     if (h.gopMs !== null && h.gopMs > 2000) warnings.push(`keyframeIntervalTooLong (${h.gopMs} ms > 2000)`);
     return {
       sample: { receiving: h.receiving, probeFailed: h.error !== null, warnings, audioMissing },
-      detail: { videoKbps: h.videoKbps, audioKbps: h.audioKbps, fps: h.fps, warnings },
+      detail: { videoKbps: h.videoKbps, audioKbps: h.audioKbps, fps: h.fps, warnings, evidence: h.evidence },
+      probeError: h.error,
     };
   }
 
@@ -159,10 +170,24 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
       consecutiveBad: 0,
       restarts: 0,
       consecutiveNoAudio: 0,
-      health: { state: 'unknown', reason: 'Not yet checked', videoKbps: null, audioKbps: null, fps: null, pushKbps: null, warnings: [], alarm: false, audioAlarm: false, checkedAt: 0 },
+      loggedProbeError: null,
+      health: { state: 'unknown', reason: 'Not yet checked', videoKbps: null, audioKbps: null, fps: null, pushKbps: null, warnings: [], alarm: false, audioAlarm: false, evidence: null, checkedAt: 0 },
     };
 
-    const { sample: s, detail } = await sample(ps);
+    const { sample: s, detail, probeError = null } = await sample(ps);
+
+    // An unusable reading used to leave no trace at all: on 10-28 and 11-04 the Facebook health line
+    // simply never appeared, so nobody could say what Facebook had answered. Record the cause, once
+    // per change, with the full evidence.
+    let loggedProbeError = tracked.loggedProbeError;
+    if (probeError && probeError !== loggedProbeError) {
+      logEvent(streamId, platform, 'health_probe_unusable', detail.evidence ?? probeError);
+      console.warn(`[health] ${platform}: no usable reading — ${detail.evidence ?? probeError}`);
+      loggedProbeError = probeError;
+    } else if (!probeError && loggedProbeError && s.receiving) {
+      logEvent(streamId, platform, 'health_probe_usable', detail.evidence ?? 'reading available again');
+      loggedProbeError = null;
+    }
     const startedAt = legStartedAt(streamId, platform);
     // No running leg = treat as freshly started so we don't escalate against a leg the fan-out is
     // already in the middle of reconnecting.
@@ -190,6 +215,7 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
       warnings: detail.warnings ?? [],
       alarm: decision.action === 'alarm' || (tracked.health.alarm && decision.state === 'not_receiving'),
       audioAlarm: decision.audioAlarm,
+      evidence: detail.evidence ?? null,
       checkedAt: Date.now(),
     };
 
@@ -197,6 +223,7 @@ async function pollOnce(streamId: string, monitor: Monitor): Promise<void> {
       consecutiveBad: decision.consecutiveBad,
       restarts: decision.restarts,
       consecutiveNoAudio: decision.consecutiveNoAudio,
+      loggedProbeError,
       health,
     });
 

@@ -745,7 +745,8 @@ async function publishFacebookAndAnnounce(streamId: string, stream: Stream, fbPs
   if (!mayPublishToFacebook(stream.is_test, 'publish_live_now')) {
     const { receiving, detail } = await waitForPlatformReceiving(fbPs, { timeoutMs: 45_000 });
     logEvent(streamId, 'facebook', receiving ? 'test_ingest_confirmed' : 'test_ingest_unconfirmed',
-      `TEST stream — leaving the live video unpublished (${receiving ? `receiving, ${describe(detail)}` : 'no ingest reported'})`);
+      `TEST stream — leaving the live video unpublished (${receiving ? `receiving, ${describe(detail)}` : 'no ingest reported'})` +
+      (detail.evidence ? `. Facebook's last answer: ${detail.evidence}` : ''));
     console.log(`[manager] TEST stream — Facebook left unpublished. Ingest ${receiving ? `confirmed (${describe(detail)})` : 'NOT confirmed'}`);
     return;
   }
@@ -780,10 +781,13 @@ async function publishFacebookAndAnnounce(streamId: string, stream: Stream, fbPs
     return;
   }
 
-  console.error('[manager] Facebook never confirmed it was receiving video — announcement suppressed');
+  // Say what Facebook actually answered: "never confirmed" alone hid, for three weeks running, that
+  // Facebook was answering without any stream_health reading while recording full-length video.
+  const lastAnswer = detail.evidence ? ` Facebook's last answer: ${detail.evidence}.` : '';
+  console.error(`[manager] Facebook never confirmed it was receiving video — announcement suppressed.${lastAnswer}`);
   logEvent(streamId, 'facebook', 'ingest_unconfirmed',
     'Facebook did not report an incoming stream within 45s of publishing — announcement post suppressed. ' +
-    'The broadcast is live but may be showing nothing; check the health panel.');
+    `The broadcast is live but may be showing nothing; check the health panel.${lastAnswer}`);
   sendAlert('ingest_unconfirmed', 'facebook',
     'Published, but Facebook never reported receiving video within 45s. The announcement post was ' +
     'suppressed, so nobody has been sent a link. Facebook is probably showing nothing.');

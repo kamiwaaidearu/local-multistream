@@ -1,6 +1,10 @@
 import { config } from '../config.js';
 import { getFacebookPageToken } from '../auth/facebook.js';
 import { httpTimeout } from '../httpTimeout.js';
+import {
+  interpretFacebookIngest, unknownFacebookIngest, describeDashManifest,
+  type FacebookIngestHealth, type RawLiveVideoIngest,
+} from './facebookIngest.js';
 
 const API = `https://graph.facebook.com/${config.fbApiVersion}`;
 
@@ -93,23 +97,7 @@ export async function resolveFacebookVideoId(liveVideoId: string): Promise<strin
   return match ? match[1] : null;
 }
 
-/** Facebook's own measurement of what it is receiving on the ingest stream. */
-export interface FacebookIngestHealth {
-  /** FB's live-video status (LIVE, LIVE_STOPPED, UNPUBLISHED, VOD, …), or null if not reported. */
-  status: string | null;
-  /** True when FB reports an ingest stream carrying a non-zero video bitrate. The authoritative
-   *  "is Facebook actually getting our video" signal — see getFacebookIngestHealth. */
-  receiving: boolean;
-  videoKbps: number | null;
-  audioKbps: number | null;
-  fps: number | null;
-  /** Keyframe interval in milliseconds, as FB measures it. Must stay <= 2000. */
-  gopMs: number | null;
-  width: number | null;
-  height: number | null;
-  /** Set when the probe itself failed (network/permissions); health is then unknown, not bad. */
-  error: string | null;
-}
+export type { FacebookIngestHealth } from './facebookIngest.js';
 
 /**
  * Ask Facebook what it is actually receiving, via `ingest_streams{stream_health}`.
@@ -119,66 +107,42 @@ export interface FacebookIngestHealth {
  * video of 0:00 duration. Nor does the LIVE_NOW publish returning 200 prove anything — FB published
  * that empty video happily. Only stream_health reports the bitrate/framerate/GOP FB itself sees.
  *
- * `receiving` is false when FB reports no ingest stream or a zero video bitrate. A failed request
- * leaves `receiving` false but sets `error`, so callers can distinguish "FB says nothing is arriving"
- * from "we couldn't ask" and avoid acting on a blip in our own connectivity.
+ * `receiving` is false when FB reports no ingest stream or a zero video bitrate. A failed request, or
+ * an ingest stream with no stream_health, leaves `receiving` false but sets `error` (health unknown),
+ * so callers can tell "FB says nothing is arriving" from "we have no usable reading". `evidence`
+ * always says what FB returned; see facebookIngest.ts for why that matters.
+ *
+ * When the reading is missing, the ingest stream's DASH preview manifest is fetched and described in
+ * `evidence` — diagnostics only, never used to decide `receiving` (see describeDashManifest).
  *
  * Ref: https://developers.facebook.com/docs/live-video-api/guides/backup_stream (stream_health
  * fields: video_bitrate, video_framerate, video_gop_size, video_width, video_height, audio_bitrate —
  * bitrates in bits/sec, gop in ms).
  */
 export async function getFacebookIngestHealth(liveVideoId: string): Promise<FacebookIngestHealth> {
-  const unknown = (error: string): FacebookIngestHealth => ({
-    status: null, receiving: false, videoKbps: null, audioKbps: null,
-    fps: null, gopMs: null, width: null, height: null, error,
-  });
-
-  let data: {
-    status?: string;
-    ingest_streams?: { is_master?: boolean; stream_health?: Record<string, number> }[];
-  };
+  let data: RawLiveVideoIngest;
   try {
     const params = new URLSearchParams({
-      fields: 'status,ingest_streams{is_master,stream_health}',
+      fields: 'status,ingest_streams{is_master,stream_health,dash_preview_url}',
       access_token: getPageAuth().accessToken,
     });
     const res = await fetch(`${API}/${liveVideoId}?${params}`, { signal: httpTimeout() });
-    if (!res.ok) return unknown(await errorMessage(res));
+    if (!res.ok) return unknownFacebookIngest(`HTTP ${res.status}: ${await errorMessage(res)}`);
     data = await res.json();
   } catch (err) {
-    return unknown(err instanceof Error ? err.message : String(err));
+    return unknownFacebookIngest(err instanceof Error ? err.message : String(err));
   }
 
-  const streams = data.ingest_streams ?? [];
-  // Prefer the stream FB has designated master; with no backup stream configured there's just one.
-  const health = (streams.find((s) => s.is_master) ?? streams[0])?.stream_health;
-
-  // No stream_health at all is NOT "receiving nothing": on 2026-10-21 Facebook returned an ingest
-  // stream with no stream_health while it was recording our video, we read that as "not receiving",
-  // and the leg restart that followed ended the broadcast. An ingest stream with no reading is
-  // unknown, so nothing acts on it; no ingest stream at all, or a reading of zero, still counts as bad.
-  if (streams.length > 0 && !health) {
-    return unknown('Facebook returned an ingest stream without stream_health');
+  const h = interpretFacebookIngest(data);
+  if (h.error && h.dashPreviewUrl) {
+    try {
+      const res = await fetch(h.dashPreviewUrl, { signal: httpTimeout() });
+      h.evidence += `; ${describeDashManifest(res.status, res.ok ? await res.text() : '')}`;
+    } catch (err) {
+      h.evidence += `; DASH preview fetch failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
-  const num = (v: number | undefined): number | null =>
-    typeof v === 'number' && Number.isFinite(v) ? v : null;
-  const kbps = (v: number | undefined): number | null => {
-    const n = num(v);
-    return n === null ? null : Math.round(n / 1000);
-  };
-
-  const videoKbps = kbps(health?.video_bitrate);
-  return {
-    status: data.status ?? null,
-    receiving: videoKbps !== null && videoKbps > 0,
-    videoKbps,
-    audioKbps: kbps(health?.audio_bitrate),
-    fps: num(health?.video_framerate),
-    gopMs: num(health?.video_gop_size),
-    width: num(health?.video_width),
-    height: num(health?.video_height),
-    error: null,
-  };
+  return h;
 }
 
 /**
